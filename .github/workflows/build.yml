@@ -1,9 +1,10 @@
 name: Build Production Artifacts
 
 # Runs on:
-#   • Push / merge to main          → preview profile (internal distribution)
 #   • Version tags (v*)             → production profile (store distribution)
 #   • Manual dispatch               → caller chooses profile & platform
+#
+# For a debug APK on every push, see ci.yml instead.
 #
 # Required secrets:
 #   EXPO_TOKEN   — EAS personal access token (expo.dev → Account Settings → Access Tokens)
@@ -20,7 +21,6 @@ name: Build Production Artifacts
 
 on:
   push:
-    branches: [main]
     tags: ["v*"]
   workflow_dispatch:
     inputs:
