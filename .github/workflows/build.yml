@@ -1,0 +1,410 @@
+name: Build Production Artifacts
+
+# Runs on:
+#   • Push / merge to main          → preview profile (internal distribution)
+#   • Version tags (v*)             → production profile (store distribution)
+#   • Manual dispatch               → caller chooses profile & platform
+#
+# Required secrets:
+#   EXPO_TOKEN   — EAS personal access token (expo.dev → Account Settings → Access Tokens)
+#
+# Optional secrets (only needed for local-signing jobs, not EAS cloud):
+#   ANDROID_KEYSTORE_BASE64   — base64-encoded .jks / .keystore file
+#   ANDROID_KEY_ALIAS
+#   ANDROID_KEY_PASSWORD
+#   ANDROID_STORE_PASSWORD
+#   IOS_CERTIFICATE_BASE64    — base64-encoded .p12 distribution certificate
+#   IOS_CERTIFICATE_PASSWORD
+#   IOS_PROVISION_PROFILE_BASE64  — base64-encoded .mobileprovision file
+#   IOS_TEAM_ID
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: "EAS build profile"
+        required: true
+        default: preview
+        type: choice
+        options: [development, preview, production]
+      platform:
+        description: "Target platform"
+        required: true
+        default: all
+        type: choice
+        options: [android, ios, all]
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Shared helpers
+# ──────────────────────────────────────────────────────────────────────────────
+env:
+  # Derive profile from context when not set by manual dispatch
+  BUILD_PROFILE: >-
+    ${{ github.event_name == 'workflow_dispatch' && inputs.profile
+        || startsWith(github.ref, 'refs/tags/v') && 'production'
+        || 'preview' }}
+
+jobs:
+  # ──────────────────────────────────────────────────────────
+  # 1. Resolve build parameters for downstream jobs
+  # ──────────────────────────────────────────────────────────
+  params:
+    name: Resolve build params
+    runs-on: ubuntu-latest
+    outputs:
+      profile: ${{ steps.set.outputs.profile }}
+      run_android: ${{ steps.set.outputs.run_android }}
+      run_ios: ${{ steps.set.outputs.run_ios }}
+    steps:
+      - id: set
+        run: |
+          PLATFORM="${{ github.event_name == 'workflow_dispatch' && inputs.platform || 'all' }}"
+          PROFILE="${{ env.BUILD_PROFILE }}"
+          echo "profile=${PROFILE}" >> "$GITHUB_OUTPUT"
+          echo "run_android=$([[ $PLATFORM == android || $PLATFORM == all ]] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+          echo "run_ios=$([[ $PLATFORM == ios || $PLATFORM == all ]] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+
+  # ──────────────────────────────────────────────────────────
+  # 2a. Android — EAS cloud build (AAB / APK via EAS)
+  #     Requires: EXPO_TOKEN
+  # ──────────────────────────────────────────────────────────
+  android-eas:
+    name: Android (EAS)
+    needs: params
+    if: needs.params.outputs.run_android == 'true'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Setup EAS
+        uses: expo/expo-github-action@v8
+        with:
+          eas-version: latest
+          token: ${{ secrets.EXPO_TOKEN }}
+
+      - name: EAS Build — Android
+        id: eas_android
+        run: |
+          BUILD_JSON=$(eas build \
+            --platform android \
+            --profile "${{ needs.params.outputs.profile }}" \
+            --non-interactive \
+            --wait \
+            --json 2>/dev/null)
+          echo "$BUILD_JSON"
+          ARTIFACT_URL=$(echo "$BUILD_JSON" | jq -r '.[0].artifacts.buildUrl // empty')
+          echo "artifact_url=${ARTIFACT_URL}" >> "$GITHUB_OUTPUT"
+
+      - name: Download artifact from EAS
+        if: steps.eas_android.outputs.artifact_url != ''
+        run: |
+          URL="${{ steps.eas_android.outputs.artifact_url }}"
+          EXT="${URL##*.}"
+          curl -fsSL "$URL" -o "feedmebooks-android.$EXT"
+
+      - name: Upload Android artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: feedmebooks-android-${{ needs.params.outputs.profile }}-${{ github.sha }}
+          path: feedmebooks-android.*
+          if-no-files-found: warn
+          retention-days: 30
+
+  # ──────────────────────────────────────────────────────────
+  # 2b. Android — local signed release build (no EAS account)
+  #     Produces a signed APK + AAB using GitHub secrets.
+  #     Requires: ANDROID_KEYSTORE_BASE64 and related secrets.
+  #     Runs only when EXPO_TOKEN is absent OR on manual trigger
+  #     with profile=production to get a local artifact too.
+  # ──────────────────────────────────────────────────────────
+  android-local:
+    name: Android (local signed)
+    needs: params
+    if: |
+      needs.params.outputs.run_android == 'true' &&
+      needs.params.outputs.profile == 'production' &&
+      vars.ENABLE_LOCAL_ANDROID_BUILD == 'true'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Expo prebuild (Android)
+        run: npx expo prebuild --platform android --clean --no-install
+        env:
+          EXPO_NO_DOTENV: 1
+
+      - name: Decode keystore
+        run: |
+          echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 --decode > android/app/release.keystore
+
+      - name: Inject signing config
+        # Writes local.properties so Gradle can pick up signing credentials
+        # without modifying tracked files.
+        run: |
+          cat >> android/local.properties <<EOF
+          MYAPP_RELEASE_STORE_FILE=release.keystore
+          MYAPP_RELEASE_KEY_ALIAS=${{ secrets.ANDROID_KEY_ALIAS }}
+          MYAPP_RELEASE_STORE_PASSWORD=${{ secrets.ANDROID_STORE_PASSWORD }}
+          MYAPP_RELEASE_KEY_PASSWORD=${{ secrets.ANDROID_KEY_PASSWORD }}
+          EOF
+
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ hashFiles('android/**/*.gradle*', 'android/gradle-wrapper.properties') }}
+          restore-keys: gradle-
+
+      - name: Make Gradlew executable
+        run: chmod +x android/gradlew
+
+      - name: Build release APK
+        working-directory: android
+        run: ./gradlew assembleRelease --no-daemon
+
+      - name: Build release AAB
+        working-directory: android
+        run: ./gradlew bundleRelease --no-daemon
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: feedmebooks-release-apk-${{ github.sha }}
+          path: android/app/build/outputs/apk/release/app-release.apk
+          retention-days: 30
+
+      - name: Upload AAB
+        uses: actions/upload-artifact@v4
+        with:
+          name: feedmebooks-release-aab-${{ github.sha }}
+          path: android/app/build/outputs/bundle/release/app-release.aab
+          retention-days: 30
+
+  # ──────────────────────────────────────────────────────────
+  # 3a. iOS — EAS cloud build (IPA via EAS)
+  #     Requires: EXPO_TOKEN (EAS manages certificates)
+  # ──────────────────────────────────────────────────────────
+  ios-eas:
+    name: iOS (EAS)
+    needs: params
+    if: needs.params.outputs.run_ios == 'true'
+    runs-on: ubuntu-latest  # EAS builds iOS on Expo infra; no macOS runner needed
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Setup EAS
+        uses: expo/expo-github-action@v8
+        with:
+          eas-version: latest
+          token: ${{ secrets.EXPO_TOKEN }}
+
+      - name: EAS Build — iOS
+        id: eas_ios
+        run: |
+          BUILD_JSON=$(eas build \
+            --platform ios \
+            --profile "${{ needs.params.outputs.profile }}" \
+            --non-interactive \
+            --wait \
+            --json 2>/dev/null)
+          echo "$BUILD_JSON"
+          ARTIFACT_URL=$(echo "$BUILD_JSON" | jq -r '.[0].artifacts.buildUrl // empty')
+          echo "artifact_url=${ARTIFACT_URL}" >> "$GITHUB_OUTPUT"
+
+      - name: Download IPA from EAS
+        if: steps.eas_ios.outputs.artifact_url != ''
+        run: |
+          curl -fsSL "${{ steps.eas_ios.outputs.artifact_url }}" -o feedmebooks-ios.ipa
+
+      - name: Upload iOS artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: feedmebooks-ios-${{ needs.params.outputs.profile }}-${{ github.sha }}
+          path: feedmebooks-ios.ipa
+          if-no-files-found: warn
+          retention-days: 30
+
+  # ──────────────────────────────────────────────────────────
+  # 3b. iOS — local signed build on macOS runner
+  #     Requires: IOS_CERTIFICATE_BASE64, IOS_CERTIFICATE_PASSWORD,
+  #               IOS_PROVISION_PROFILE_BASE64, IOS_TEAM_ID
+  #     Enable by setting repo variable ENABLE_LOCAL_IOS_BUILD=true
+  # ──────────────────────────────────────────────────────────
+  ios-local:
+    name: iOS (local signed)
+    needs: params
+    if: |
+      needs.params.outputs.run_ios == 'true' &&
+      needs.params.outputs.profile == 'production' &&
+      vars.ENABLE_LOCAL_IOS_BUILD == 'true'
+    runs-on: macos-14  # M-series runner for faster Xcode builds
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode_15.4.app
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Expo prebuild (iOS)
+        run: npx expo prebuild --platform ios --clean --no-install
+        env:
+          EXPO_NO_DOTENV: 1
+
+      - name: Install CocoaPods
+        working-directory: ios
+        run: pod install --repo-update
+
+      - name: Import distribution certificate
+        env:
+          CERTIFICATE_BASE64: ${{ secrets.IOS_CERTIFICATE_BASE64 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.IOS_CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ github.run_id }}
+        run: |
+          CERT_PATH=$RUNNER_TEMP/dist_cert.p12
+          KEYCHAIN_PATH=$RUNNER_TEMP/build.keychain
+
+          echo "$CERTIFICATE_BASE64" | base64 --decode -o "$CERT_PATH"
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security import "$CERT_PATH" -P "$CERTIFICATE_PASSWORD" \
+            -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+          security list-keychain -d user -s "$KEYCHAIN_PATH"
+
+      - name: Install provisioning profile
+        env:
+          PROVISION_BASE64: ${{ secrets.IOS_PROVISION_PROFILE_BASE64 }}
+        run: |
+          PROFILE_PATH="$HOME/Library/MobileDevice/Provisioning Profiles"
+          mkdir -p "$PROFILE_PATH"
+          echo "$PROVISION_BASE64" | base64 --decode -o "$PROFILE_PATH/dist.mobileprovision"
+
+      - name: Build & archive
+        env:
+          TEAM_ID: ${{ secrets.IOS_TEAM_ID }}
+        run: |
+          xcodebuild \
+            -workspace ios/feedmebooks.xcworkspace \
+            -scheme feedmebooks \
+            -configuration Release \
+            -destination generic/platform=iOS \
+            -archivePath "$RUNNER_TEMP/feedmebooks.xcarchive" \
+            DEVELOPMENT_TEAM="$TEAM_ID" \
+            CODE_SIGN_STYLE=Manual \
+            archive \
+            | xcpretty
+
+      - name: Export IPA
+        run: |
+          cat > "$RUNNER_TEMP/export_options.plist" <<'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>method</key>
+            <string>app-store-connect</string>
+            <key>teamID</key>
+            <string>${{ secrets.IOS_TEAM_ID }}</string>
+            <key>uploadBitcode</key>
+            <false/>
+            <key>compileBitcode</key>
+            <false/>
+          </dict>
+          </plist>
+          PLIST
+
+          xcodebuild -exportArchive \
+            -archivePath "$RUNNER_TEMP/feedmebooks.xcarchive" \
+            -exportOptionsPlist "$RUNNER_TEMP/export_options.plist" \
+            -exportPath "$RUNNER_TEMP/ipa" \
+            | xcpretty
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: feedmebooks-ios-local-${{ github.sha }}
+          path: ${{ runner.temp }}/ipa/*.ipa
+          retention-days: 30
+
+  # ──────────────────────────────────────────────────────────
+  # 4. Summary — posted to the workflow run
+  # ──────────────────────────────────────────────────────────
+  summary:
+    name: Build summary
+    runs-on: ubuntu-latest
+    if: always()
+    needs: [params, android-eas, ios-eas]
+    steps:
+      - name: Write summary
+        run: |
+          echo "## Build Results" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Job | Status |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|-----|--------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Android (EAS) | ${{ needs.android-eas.result }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| iOS (EAS)     | ${{ needs.ios-eas.result }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Profile:** \`${{ needs.params.outputs.profile }}\`  " >> "$GITHUB_STEP_SUMMARY"
+          echo "**Commit:** \`${{ github.sha }}\`" >> "$GITHUB_STEP_SUMMARY"
