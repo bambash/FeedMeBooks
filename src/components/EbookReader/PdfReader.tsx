@@ -50,6 +50,13 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: colors.bg,
   },
+  loader: {
+    ...StyleSheet.absoluteFillObject,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: colors.bg,
+    zIndex: 10,
+  },
   pdf: {
     flex: 1,
     backgroundColor: colors.bg,
