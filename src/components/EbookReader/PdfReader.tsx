@@ -11,10 +11,10 @@ interface Props {
 }
 
 export default function PdfReader({ uri, savedPosition, onPositionChange }: Props) {
-  const [totalPages, setTotalPages] = useState(1);
+  const [loading, setLoading] = useState(true);
 
   const onLoadComplete = useCallback((numberOfPages: number) => {
-    setTotalPages(numberOfPages);
+    setLoading(false);
   }, []);
 
   const onPageChanged = useCallback(
@@ -27,13 +27,17 @@ export default function PdfReader({ uri, savedPosition, onPositionChange }: Prop
 
   return (
     <View style={styles.container}>
+      {loading && (
+        <View style={styles.loader}>
+          <ActivityIndicator size="large" color={colors.primary} />
+        </View>
+      )}
       <Pdf
         source={{ uri, cache: true }}
         page={savedPosition.page ?? 1}
         onLoadComplete={onLoadComplete}
         onPageChanged={onPageChanged}
         style={styles.pdf}
-        activityIndicator={<ActivityIndicator size="large" color={colors.primary} />}
         enablePaging
         horizontal
       />
