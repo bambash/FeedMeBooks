@@ -64,6 +64,17 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # expo-modules-core ≤1.12.21 accesses `components.release` inside a single
+      # `afterEvaluate`, which is too early for AGP 8.3+ to have registered the
+      # component. Wrapping it in a second `afterEvaluate` defers the lookup
+      # until the component exists. This patch is applied to node_modules in CI
+      # because we cannot change the upstream package without upgrading Expo SDK.
+      - name: Patch ExpoModulesCorePlugin.gradle (components.release timing fix)
+        run: |
+          sed -i \
+            's/from components\.release/afterEvaluate { from components.release }/' \
+            node_modules/expo-modules-core/android/ExpoModulesCorePlugin.gradle
+
       - name: Cache Expo prebuild
         uses: actions/cache@v4
         with:
@@ -77,14 +88,6 @@ jobs:
         run: npx expo prebuild --platform android --clean --no-install
         env:
           EXPO_NO_DOTENV: 1
-
-      # expo-modules-core bundled with Expo SDK 51 uses `components.release`
-      # which breaks under Gradle 8.7+. Pin the wrapper to 8.6 which is what
-      # SDK 51 was tested against.
-      - name: Pin Gradle to 8.6 (expo-modules-core compatibility)
-        run: |
-          sed -i 's|distributionUrl=.*|distributionUrl=https\\://services.gradle.org/distributions/gradle-8.6-all.zip|' \
-            android/gradle/wrapper/gradle-wrapper.properties
 
       - name: Cache Gradle dependencies
         uses: actions/cache@v4
