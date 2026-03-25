@@ -78,13 +78,21 @@ jobs:
         env:
           EXPO_NO_DOTENV: 1
 
+      # expo-modules-core bundled with Expo SDK 51 uses `components.release`
+      # which breaks under Gradle 8.7+. Pin the wrapper to 8.6 which is what
+      # SDK 51 was tested against.
+      - name: Pin Gradle to 8.6 (expo-modules-core compatibility)
+        run: |
+          sed -i 's|distributionUrl=.*|distributionUrl=https\\://services.gradle.org/distributions/gradle-8.6-all.zip|' \
+            android/gradle/wrapper/gradle-wrapper.properties
+
       - name: Cache Gradle dependencies
         uses: actions/cache@v4
         with:
           path: |
             ~/.gradle/caches
             ~/.gradle/wrapper
-          key: gradle-${{ hashFiles('android/**/*.gradle*', 'android/gradle-wrapper.properties') }}
+          key: gradle-${{ hashFiles('android/**/*.gradle*', 'android/gradle/wrapper/gradle-wrapper.properties') }}
           restore-keys: gradle-
 
       - name: Make Gradlew executable
