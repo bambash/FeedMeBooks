@@ -89,6 +89,15 @@ jobs:
         env:
           EXPO_NO_DOTENV: 1
 
+      # Inject bundleInDebug = true into the react {} block so Gradle runs the
+      # JS bundler and embeds index.android.bundle into the APK. Without this
+      # the debug APK tries to connect to a Metro dev server at runtime.
+      - name: Patch app/build.gradle to embed JS bundle
+        run: |
+          sed -i 's/^react {/react {\n    bundleInDebug = true/' android/app/build.gradle
+          echo "react block after patch:"
+          grep -A3 "^react {" android/app/build.gradle
+
       - name: Cache Gradle dependencies
         uses: actions/cache@v4
         with:
@@ -103,9 +112,7 @@ jobs:
 
       - name: Build debug APK
         working-directory: android
-        # bundleInDebug=true embeds the JS bundle into the APK so it runs
-        # standalone without a Metro dev server connection.
-        run: ./gradlew assembleDebug -PbundleInDebug=true --no-daemon --stacktrace
+        run: ./gradlew assembleDebug --no-daemon --stacktrace
 
       - name: Upload debug APK
         uses: actions/upload-artifact@v4
