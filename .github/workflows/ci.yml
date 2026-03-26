@@ -89,19 +89,10 @@ jobs:
         env:
           EXPO_NO_DOTENV: 1
 
-      # Inject bundleInDebug = true into the react {} block so Gradle runs the
-      # JS bundler and embeds index.android.bundle into the APK. Without this
-      # the debug APK tries to connect to a Metro dev server at runtime.
-      - name: Patch app/build.gradle to embed JS bundle
-        run: |
-          sed -i 's/^react {/react {\n    bundleInDebug = true/' android/app/build.gradle
-          echo "react block after patch:"
-          grep -A3 "^react {" android/app/build.gradle
-
-      # Pre-bundle JS explicitly — bundleInDebug alone is not reliably picked
-      # up by the RN 0.74 Gradle plugin. Running expo export:embed ahead of
-      # Gradle guarantees index.android.bundle lands in src/main/assets and
-      # gets included in the APK as a static asset.
+      # Pre-bundle JS explicitly — expo export:embed runs Metro and writes
+      # index.android.bundle to android/app/src/main/assets/ which Android's
+      # build system packages into the APK as a static asset, making the APK
+      # work standalone without a Metro dev server.
       - name: Bundle JS for Android (expo export:embed)
         run: |
           mkdir -p android/app/src/main/assets
