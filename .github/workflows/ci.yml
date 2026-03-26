@@ -121,6 +121,22 @@ jobs:
             --reset-cache
           echo "Bundle size: $(wc -c < android/app/src/main/assets/index.android.bundle) bytes"
 
+      # Pre-bundle JS explicitly — bundleInDebug alone is not reliably picked
+      # up by the RN 0.74 Gradle plugin. Running expo export:embed ahead of
+      # Gradle guarantees index.android.bundle lands in src/main/assets and
+      # gets included in the APK as a static asset.
+      - name: Bundle JS for Android (expo export:embed)
+        run: |
+          mkdir -p android/app/src/main/assets
+          npx expo export:embed \
+            --platform android \
+            --entry-file node_modules/expo-router/entry.js \
+            --dev false \
+            --bundle-output android/app/src/main/assets/index.android.bundle \
+            --assets-dest android/app/src/main/res/ \
+            --reset-cache
+          echo "Bundle size: $(wc -c < android/app/src/main/assets/index.android.bundle) bytes"
+
       - name: Cache Gradle dependencies
         uses: actions/cache@v4
         with:
