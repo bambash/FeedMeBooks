@@ -21,6 +21,7 @@ import {
   isAudioExtension,
   isEbookExtension,
   pickAudioFiles,
+  pickAudioFolder,
   pickCoverImage,
   pickEbookFile,
   sanitizeFilename,
@@ -76,17 +77,25 @@ export default function AddBookModal({ visible, onClose }: Props) {
     }
   }, [title]);
 
+  const mergeAudioFiles = useCallback((incoming: { uri: string; name: string }[]) => {
+    setAudioFiles((prev) => {
+      const merged = [...prev, ...incoming];
+      const unique = merged.filter((f, i, arr) => arr.findIndex((x) => x.name === f.name) === i);
+      return unique.sort((a, b) => a.name.localeCompare(b.name));
+    });
+  }, []);
+
+  const handlePickAudioFolder = useCallback(async () => {
+    const files = await pickAudioFolder();
+    if (files.length > 0) mergeAudioFiles(files);
+  }, [mergeAudioFiles]);
+
   const handlePickAudio = useCallback(async () => {
     const result = await pickAudioFiles();
     if (!result.canceled && result.assets?.length) {
-      const picked = result.assets.map((a) => ({ uri: a.uri, name: a.name }));
-      setAudioFiles((prev) => {
-        const merged = [...prev, ...picked];
-        const unique = merged.filter((f, i, arr) => arr.findIndex((x) => x.name === f.name) === i);
-        return unique.sort((a, b) => a.name.localeCompare(b.name));
-      });
+      mergeAudioFiles(result.assets.map((a) => ({ uri: a.uri, name: a.name })));
     }
-  }, []);
+  }, [mergeAudioFiles]);
 
   const removeAudioFile = useCallback((name: string) => {
     setAudioFiles((prev) => prev.filter((f) => f.name !== name));
@@ -230,7 +239,7 @@ export default function AddBookModal({ visible, onClose }: Props) {
             />
           </Field>
 
-          <Field label="Audiobook Files" hint="mp3, m4b, m4a, wav, aac, ogg, flac, opus · multi-select OK">
+          <Field label="Audiobook Files" hint="mp3, m4b, m4a, wav, aac, ogg, flac, opus">
             {audioFiles.map((f) => (
               <View key={f.name} style={styles.fileSelected}>
                 <Text style={styles.fileName} numberOfLines={1}>{f.name}</Text>
@@ -239,11 +248,14 @@ export default function AddBookModal({ visible, onClose }: Props) {
                 </Pressable>
               </View>
             ))}
-            <Pressable style={styles.filePicker} onPress={handlePickAudio}>
-              <Text style={styles.filePickerText}>
-                {audioFiles.length === 0 ? 'Choose audio file(s)…' : 'Add more files…'}
-              </Text>
-            </Pressable>
+            <View style={styles.audioPickerRow}>
+              <Pressable style={[styles.filePicker, styles.audioPickerBtn]} onPress={handlePickAudioFolder}>
+                <Text style={styles.filePickerText}>Pick folder…</Text>
+              </Pressable>
+              <Pressable style={[styles.filePicker, styles.audioPickerBtn]} onPress={handlePickAudio}>
+                <Text style={styles.filePickerText}>Pick files…</Text>
+              </Pressable>
+            </View>
           </Field>
 
           <Field label="Cover Image" hint="optional">
@@ -417,5 +429,12 @@ const styles = StyleSheet.create({
   clearBtnText: {
     color: colors.textMuted,
     fontSize: 14,
+  },
+  audioPickerRow: {
+    flexDirection: 'row',
+    gap: spacing.sm,
+  },
+  audioPickerBtn: {
+    flex: 1,
   },
 });

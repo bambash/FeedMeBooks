@@ -81,6 +81,45 @@ export async function pickAudioFiles(): Promise<DocumentPicker.DocumentPickerRes
   });
 }
 
+/**
+ * Extract a human-readable filename from a SAF content:// URI.
+ * SAF document URIs look like:
+ *   content://authority/tree/primary%3AMusic/document/primary%3AMusic%2Ftrack01.mp3
+ * The docId after /document/ is "primary:Music/track01.mp3", so we take the last path segment.
+ */
+function extractSafFilename(safUri: string): string {
+  try {
+    const decoded = decodeURIComponent(safUri);
+    const docId = decoded.split('/document/').pop() ?? decoded;
+    const relativePath = docId.includes(':') ? docId.split(':').slice(1).join(':') : docId;
+    return relativePath.split('/').pop() ?? relativePath;
+  } catch {
+    return safUri.split('/').pop() ?? safUri;
+  }
+}
+
+/**
+ * Open the Android folder picker (StorageAccessFramework) and return
+ * all audio files found directly inside the chosen directory.
+ * Falls back to multi-file document picker on iOS.
+ */
+export async function pickAudioFolder(): Promise<{ uri: string; name: string }[]> {
+  const { StorageAccessFramework } = FileSystem;
+  const result = await StorageAccessFramework.requestDirectoryPermissionsAsync();
+  if (!result.granted) return [];
+
+  const fileUris = await StorageAccessFramework.readDirectoryAsync(result.directoryUri);
+  const audioFiles: { uri: string; name: string }[] = [];
+  for (const uri of fileUris) {
+    const name = extractSafFilename(uri);
+    const ext = getExtension(name);
+    if (isAudioExtension(ext)) {
+      audioFiles.push({ uri, name });
+    }
+  }
+  return audioFiles.sort((a, b) => a.name.localeCompare(b.name));
+}
+
 export async function pickCoverImage(): Promise<DocumentPicker.DocumentPickerResult> {
   return DocumentPicker.getDocumentAsync({
     type: ['image/jpeg', 'image/png', 'image/webp'],
