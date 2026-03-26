@@ -1,9 +1,9 @@
 export type EbookFormat = 'epub' | 'pdf' | 'txt';
-export type AudioFormat = 'mp3' | 'wav' | 'm4a' | 'm4b' | 'aac' | 'ogg' | 'flac' | 'opus';
+export type AudioFormat = 'mp3' | 'wav' | 'm4a' | 'm4b' | 'mp4' | 'aac' | 'ogg' | 'flac' | 'opus';
 export type ReaderMode = 'ebook' | 'audio';
 
 export const SUPPORTED_EBOOK_EXTENSIONS: EbookFormat[] = ['epub', 'pdf', 'txt'];
-export const SUPPORTED_AUDIO_EXTENSIONS: AudioFormat[] = ['mp3', 'wav', 'm4a', 'm4b', 'aac', 'ogg', 'flac', 'opus'];
+export const SUPPORTED_AUDIO_EXTENSIONS: AudioFormat[] = ['mp3', 'wav', 'm4a', 'm4b', 'mp4', 'aac', 'ogg', 'flac', 'opus'];
 
 export const EBOOK_MIME_TYPES = [
   'application/epub+zip',
@@ -16,6 +16,7 @@ export const AUDIO_MIME_TYPES = [
   'audio/wav',
   'audio/x-wav',
   'audio/mp4',
+  'video/mp4',
   'audio/x-m4a',
   'audio/m4b',
   'audio/aac',
