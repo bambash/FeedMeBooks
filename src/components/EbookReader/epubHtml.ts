@@ -43,6 +43,26 @@ export function buildEpubHtml(theme: EpubTheme): string {
       width: 100%;
       height: 100%;
     }
+    .nav-zone {
+      position: fixed;
+      top: 0; bottom: 0;
+      width: 38%;
+      z-index: 5;
+      display: flex;
+      align-items: center;
+      opacity: 0;
+      transition: opacity 0.15s;
+      pointer-events: none;
+    }
+    .nav-zone.active { opacity: 1; }
+    .nav-prev { left: 0; justify-content: flex-start; padding-left: 12px; }
+    .nav-next { right: 0; justify-content: flex-end; padding-right: 12px; }
+    .nav-arrow {
+      font-size: 28px;
+      color: rgba(255,255,255,0.55);
+      text-shadow: 0 0 8px rgba(0,0,0,0.8);
+      user-select: none;
+    }
     #error {
       display: none;
       position: fixed;
@@ -78,6 +98,8 @@ export function buildEpubHtml(theme: EpubTheme): string {
   <div id="loading"><div class="spinner"></div></div>
   <div id="viewer"></div>
   <div id="error"></div>
+  <div class="nav-zone nav-prev" id="navPrev"><span class="nav-arrow">‹</span></div>
+  <div class="nav-zone nav-next" id="navNext"><span class="nav-arrow">›</span></div>
 
   <script>
     var book = null;
@@ -149,18 +171,51 @@ export function buildEpubHtml(theme: EpubTheme): string {
       }
     }
 
-    // Swipe navigation
+    // Tap zones: right 40% → next, left 40% → prev, middle 20% → ignored
+    // Also handle swipe for users who prefer it
     var touchStartX = 0;
+    var touchStartY = 0;
+    var touchMoved = false;
     document.addEventListener('touchstart', function(e) {
       touchStartX = e.touches[0].clientX;
+      touchStartY = e.touches[0].clientY;
+      touchMoved = false;
+    }, { passive: true });
+    document.addEventListener('touchmove', function(e) {
+      var dx = Math.abs(e.touches[0].clientX - touchStartX);
+      var dy = Math.abs(e.touches[0].clientY - touchStartY);
+      if (dx > 10 || dy > 10) touchMoved = true;
     }, { passive: true });
     document.addEventListener('touchend', function(e) {
-      var dx = e.changedTouches[0].clientX - touchStartX;
-      if (Math.abs(dx) > 60) {
-        if (dx < 0) { if (rendition) rendition.next(); }
-        else        { if (rendition) rendition.prev(); }
+      var endX = e.changedTouches[0].clientX;
+      var dx = endX - touchStartX;
+      var dy = e.changedTouches[0].clientY - touchStartY;
+      if (!rendition) return;
+      // Horizontal swipe (more horizontal than vertical, >50px)
+      if (Math.abs(dx) > 50 && Math.abs(dx) > Math.abs(dy) * 1.5) {
+        if (dx < 0) rendition.next();
+        else        rendition.prev();
+        return;
+      }
+      // Tap (no significant movement)
+      if (!touchMoved) {
+        var w = window.innerWidth;
+        if (endX > w * 0.6) {
+          flashZone('navNext');
+          rendition.next();
+        } else if (endX < w * 0.4) {
+          flashZone('navPrev');
+          rendition.prev();
+        }
       }
     }, { passive: true });
+
+    function flashZone(id) {
+      var el = document.getElementById(id);
+      if (!el) return;
+      el.classList.add('active');
+      setTimeout(function() { el.classList.remove('active'); }, 200);
+    }
 
     // Keyboard navigation
     document.addEventListener('keydown', function(e) {
