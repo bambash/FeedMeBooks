@@ -20,7 +20,7 @@ import {
   getExtension,
   isAudioExtension,
   isEbookExtension,
-  pickAudioFile,
+  pickAudioFiles,
   pickCoverImage,
   pickEbookFile,
   sanitizeFilename,
@@ -44,7 +44,7 @@ export default function AddBookModal({ visible, onClose }: Props) {
   const [title, setTitle] = useState('');
   const [author, setAuthor] = useState('');
   const [ebookFile, setEbookFile] = useState<FileState | null>(null);
-  const [audioFile, setAudioFile] = useState<FileState | null>(null);
+  const [audioFiles, setAudioFiles] = useState<FileState[]>([]);
   const [coverFile, setCoverFile] = useState<FileState | null>(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
@@ -53,7 +53,7 @@ export default function AddBookModal({ visible, onClose }: Props) {
     setTitle('');
     setAuthor('');
     setEbookFile(null);
-    setAudioFile(null);
+    setAudioFiles([]);
     setCoverFile(null);
     setError('');
     setSaving(false);
@@ -77,11 +77,19 @@ export default function AddBookModal({ visible, onClose }: Props) {
   }, [title]);
 
   const handlePickAudio = useCallback(async () => {
-    const result = await pickAudioFile();
-    if (!result.canceled && result.assets?.[0]) {
-      const asset = result.assets[0];
-      setAudioFile({ uri: asset.uri, name: asset.name });
+    const result = await pickAudioFiles();
+    if (!result.canceled && result.assets?.length) {
+      const picked = result.assets.map((a) => ({ uri: a.uri, name: a.name }));
+      setAudioFiles((prev) => {
+        const merged = [...prev, ...picked];
+        const unique = merged.filter((f, i, arr) => arr.findIndex((x) => x.name === f.name) === i);
+        return unique.sort((a, b) => a.name.localeCompare(b.name));
+      });
     }
+  }, []);
+
+  const removeAudioFile = useCallback((name: string) => {
+    setAudioFiles((prev) => prev.filter((f) => f.name !== name));
   }, []);
 
   const handlePickCover = useCallback(async () => {
@@ -97,7 +105,7 @@ export default function AddBookModal({ visible, onClose }: Props) {
       setError('Please enter a book title.');
       return;
     }
-    if (!ebookFile && !audioFile) {
+    if (!ebookFile && audioFiles.length === 0) {
       setError('Please add at least one file (ebook or audio).');
       return;
     }
@@ -109,7 +117,7 @@ export default function AddBookModal({ visible, onClose }: Props) {
       const bookId = generateId();
       let ebookUri: string | undefined;
       let ebookFormat: EbookFormat | undefined;
-      let audioUri: string | undefined;
+      let audioUris: string[] | undefined;
       let audioFormat: AudioFormat | undefined;
       let coverUri: string | undefined;
 
@@ -124,15 +132,16 @@ export default function AddBookModal({ visible, onClose }: Props) {
         );
       }
 
-      if (audioFile) {
-        const ext = getExtension(audioFile.name);
-        if (!isAudioExtension(ext)) throw new Error(`Unsupported audio format: .${ext}`);
-        audioFormat = ext as AudioFormat;
-        audioUri = await copyFileToAppStorage(
-          audioFile.uri,
-          bookId,
-          sanitizeFilename(audioFile.name),
-        );
+      if (audioFiles.length > 0) {
+        const copied: string[] = [];
+        for (const af of audioFiles) {
+          const ext = getExtension(af.name);
+          if (!isAudioExtension(ext)) throw new Error(`Unsupported audio format: .${ext}`);
+          if (!audioFormat) audioFormat = ext as AudioFormat;
+          const uri = await copyFileToAppStorage(af.uri, bookId, sanitizeFilename(af.name));
+          copied.push(uri);
+        }
+        audioUris = copied;
       }
 
       if (coverFile) {
@@ -149,7 +158,7 @@ export default function AddBookModal({ visible, onClose }: Props) {
         author: author.trim(),
         ebookUri,
         ebookFormat,
-        audioUri,
+        audioUris,
         audioFormat,
         coverUri,
       });
@@ -161,7 +170,7 @@ export default function AddBookModal({ visible, onClose }: Props) {
     } finally {
       setSaving(false);
     }
-  }, [title, author, ebookFile, audioFile, coverFile, addBook, reset, onClose]);
+  }, [title, author, ebookFile, audioFiles, coverFile, addBook, reset, onClose]);
 
   return (
     <Modal visible={visible} animationType="slide" presentationStyle="pageSheet" onRequestClose={handleClose}>
@@ -221,13 +230,20 @@ export default function AddBookModal({ visible, onClose }: Props) {
             />
           </Field>
 
-          <Field label="Audiobook File" hint="mp3, m4b, m4a, wav, aac, ogg, flac, opus">
-            <FilePicker
-              file={audioFile}
-              placeholder="Choose audio file…"
-              onPick={handlePickAudio}
-              onClear={() => setAudioFile(null)}
-            />
+          <Field label="Audiobook Files" hint="mp3, m4b, m4a, wav, aac, ogg, flac, opus · multi-select OK">
+            {audioFiles.map((f) => (
+              <View key={f.name} style={styles.fileSelected}>
+                <Text style={styles.fileName} numberOfLines={1}>{f.name}</Text>
+                <Pressable onPress={() => removeAudioFile(f.name)} style={styles.clearBtn}>
+                  <Text style={styles.clearBtnText}>✕</Text>
+                </Pressable>
+              </View>
+            ))}
+            <Pressable style={styles.filePicker} onPress={handlePickAudio}>
+              <Text style={styles.filePickerText}>
+                {audioFiles.length === 0 ? 'Choose audio file(s)…' : 'Add more files…'}
+              </Text>
+            </Pressable>
           </Field>
 
           <Field label="Cover Image" hint="optional">

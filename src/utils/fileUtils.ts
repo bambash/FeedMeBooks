@@ -73,6 +73,14 @@ export async function pickAudioFile(): Promise<DocumentPicker.DocumentPickerResu
   });
 }
 
+export async function pickAudioFiles(): Promise<DocumentPicker.DocumentPickerResult> {
+  return DocumentPicker.getDocumentAsync({
+    type: AUDIO_MIME_TYPES,
+    copyToCacheDirectory: true,
+    multiple: true,
+  });
+}
+
 export async function pickCoverImage(): Promise<DocumentPicker.DocumentPickerResult> {
   return DocumentPicker.getDocumentAsync({
     type: ['image/jpeg', 'image/png', 'image/webp'],

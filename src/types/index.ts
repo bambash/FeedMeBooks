@@ -38,7 +38,8 @@ export interface EbookPosition {
 
 export interface BookSession {
   ebookPosition: EbookPosition;
-  audioPosition: number; // seconds
+  audioPosition: number; // seconds within the current audio file
+  audioFileIndex: number; // index into book.audioUris
   lastMode: ReaderMode;
   lastOpenedAt: number; // unix ms
 }
@@ -49,7 +50,7 @@ export interface Book {
   author: string;
   ebookUri?: string;
   ebookFormat?: EbookFormat;
-  audioUri?: string;
+  audioUris?: string[]; // ordered list; single-file books have length 1
   audioFormat?: AudioFormat;
   coverUri?: string;
   session: BookSession;
