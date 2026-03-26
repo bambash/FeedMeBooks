@@ -33,7 +33,7 @@ export default function LibraryScreen() {
             onPress: () => {
               Alert.alert(
                 'Delete Book',
-                `Remove "${book.title}" from your library? This will delete all associated files.`,
+                `Remove "${book.title}" from your library? The app's copies of the files will be deleted, but your original files are not affected.`,
                 [
                   { text: 'Cancel', style: 'cancel' },
                   {
