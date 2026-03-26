@@ -64,36 +64,16 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      # expo-modules-core bundled with Expo SDK 51 contains a maven-publish block
+      # expo-modules-core <=1.12.21 contains a maven-publish block (lines 81-94)
       # that accesses components.release, which AGP 8.3+ never registers for
-      # subprojects in this build context. The block is only needed for publishing
-      # expo as a Maven artifact — not for building APKs — so we remove it entirely.
+      # subprojects. The block is only needed for Maven publishing, not APK builds.
+      # package-lock.json pins the exact version so line numbers are stable.
       - name: Patch ExpoModulesCorePlugin.gradle (remove broken maven-publish block)
         run: |
-          python3 - <<'EOF'
-          import pathlib
-          f = pathlib.Path('node_modules/expo-modules-core/android/ExpoModulesCorePlugin.gradle')
-          content = f.read_text()
-          # Use brace-counting to precisely remove the project.afterEvaluate block
-          # that accesses components.release. The block is only used for Maven
-          # publishing and is not needed to build APKs.
-          marker = '\n  project.afterEvaluate {'
-          start = content.find(marker)
-          if start == -1:
-              print('Marker not found - patch may already be applied'); exit(0)
-          depth, i, end = 0, start + 1, -1
-          while i < len(content):
-              if content[i] == '{': depth += 1
-              elif content[i] == '}':
-                  depth -= 1
-                  if depth == 0:
-                      end = i + 1
-                      break
-              i += 1
-          patched = content[:start] + content[end:]
-          f.write_text(patched)
-          print('Patch applied. components.release present:', 'components.release' in patched)
-          EOF
+          FILE=node_modules/expo-modules-core/android/ExpoModulesCorePlugin.gradle
+          sed -i '81,94d' "$FILE"
+          echo "Patch applied. Remaining references to components.release:"
+          grep -c 'components\.release' "$FILE" || echo "0 (clean)"
 
       - name: Cache Expo prebuild
         uses: actions/cache@v4
