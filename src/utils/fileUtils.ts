@@ -83,25 +83,45 @@ export async function pickAudioFiles(): Promise<DocumentPicker.DocumentPickerRes
 
 /**
  * Extract a human-readable filename from a SAF content:// URI.
- * SAF document URIs look like:
- *   content://authority/tree/primary%3AMusic/document/primary%3AMusic%2Ftrack01.mp3
- * The docId after /document/ is "primary:Music/track01.mp3", so we take the last path segment.
+ * Tries multiple strategies to handle different storage providers.
  */
 function extractSafFilename(safUri: string): string {
   try {
     const decoded = decodeURIComponent(safUri);
-    const docId = decoded.split('/document/').pop() ?? decoded;
-    const relativePath = docId.includes(':') ? docId.split(':').slice(1).join(':') : docId;
-    return relativePath.split('/').pop() ?? relativePath;
+
+    // Method 1: after /document/ segment (most common SAF format)
+    // URI: .../document/primary:Music/track01.mp3
+    if (decoded.includes('/document/')) {
+      const docId = decoded.split('/document/').pop()!;
+      const path = docId.includes(':') ? docId.split(':').slice(1).join(':') : docId;
+      const filename = path.split('/').pop();
+      if (filename && filename.includes('.')) return filename;
+    }
+
+    // Method 2: last path segment of decoded URI
+    const seg = decoded.split('/').pop();
+    if (seg && seg.includes('.')) return seg;
+
+    // Method 3: last segment of raw URI then decode
+    const rawSeg = safUri.split('/').pop();
+    if (rawSeg) {
+      const dec = decodeURIComponent(rawSeg);
+      const name = dec.includes(':') ? dec.split(':').pop()! : dec;
+      const filename = name.split('/').pop();
+      if (filename && filename.includes('.')) return filename;
+    }
+
+    return '';
   } catch {
-    return safUri.split('/').pop() ?? safUri;
+    return safUri.split('/').pop() ?? '';
   }
 }
 
 /**
  * Open the Android folder picker (StorageAccessFramework) and return
  * all audio files found directly inside the chosen directory.
- * Falls back to multi-file document picker on iOS.
+ * Returns SAF content:// URIs; FileSystem.copyAsync handles them via
+ * ContentResolver on Android.
  */
 export async function pickAudioFolder(): Promise<{ uri: string; name: string }[]> {
   const { StorageAccessFramework } = FileSystem;
@@ -110,13 +130,15 @@ export async function pickAudioFolder(): Promise<{ uri: string; name: string }[]
 
   const fileUris = await StorageAccessFramework.readDirectoryAsync(result.directoryUri);
   const audioFiles: { uri: string; name: string }[] = [];
+
   for (const uri of fileUris) {
     const name = extractSafFilename(uri);
+    if (!name) continue;
     const ext = getExtension(name);
-    if (isAudioExtension(ext)) {
-      audioFiles.push({ uri, name });
-    }
+    if (!isAudioExtension(ext)) continue;
+    audioFiles.push({ uri, name });
   }
+
   return audioFiles.sort((a, b) => a.name.localeCompare(b.name));
 }
 

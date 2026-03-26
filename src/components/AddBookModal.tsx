@@ -1,6 +1,7 @@
 import React, { useCallback, useState } from 'react';
 import {
   ActivityIndicator,
+  Alert,
   KeyboardAvoidingView,
   Modal,
   Platform,
@@ -86,8 +87,29 @@ export default function AddBookModal({ visible, onClose }: Props) {
   }, []);
 
   const handlePickAudioFolder = useCallback(async () => {
-    const files = await pickAudioFolder();
-    if (files.length > 0) mergeAudioFiles(files);
+    // Explain the SAF folder picker UX before opening it
+    Alert.alert(
+      'Select audiobook folder',
+      'Navigate into your audiobook folder, then tap "USE THIS FOLDER" (or "Select") at the bottom of the screen.',
+      [{
+        text: 'Open folder picker',
+        onPress: async () => {
+          try {
+            const files = await pickAudioFolder();
+            if (files.length > 0) {
+              mergeAudioFiles(files);
+            } else {
+              Alert.alert(
+                'No audio files found',
+                'No compatible audio files (mp3, m4a, m4b, flac, etc.) were found in that folder.',
+              );
+            }
+          } catch (e: any) {
+            Alert.alert('Error', e?.message ?? 'Could not read folder.');
+          }
+        },
+      }, { text: 'Cancel', style: 'cancel' }],
+    );
   }, [mergeAudioFiles]);
 
   const handlePickAudio = useCallback(async () => {
