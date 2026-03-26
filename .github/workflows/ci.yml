@@ -103,7 +103,9 @@ jobs:
 
       - name: Build debug APK
         working-directory: android
-        run: ./gradlew assembleDebug --no-daemon --stacktrace
+        # bundleInDebug=true embeds the JS bundle into the APK so it runs
+        # standalone without a Metro dev server connection.
+        run: ./gradlew assembleDebug -PbundleInDebug=true --no-daemon --stacktrace
 
       - name: Upload debug APK
         uses: actions/upload-artifact@v4
