@@ -123,6 +123,10 @@ export default function AddBookModal({ visible, onClose }: Props) {
     setAudioFiles((prev) => prev.filter((f) => f.name !== name));
   }, []);
 
+  const removeAudioFile = useCallback((name: string) => {
+    setAudioFiles((prev) => prev.filter((f) => f.name !== name));
+  }, []);
+
   const handlePickCover = useCallback(async () => {
     const result = await pickCoverImage();
     if (!result.canceled && result.assets?.[0]) {
