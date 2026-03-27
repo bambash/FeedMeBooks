@@ -133,6 +133,10 @@ export default function ReaderScreen() {
         }
       }
 
+      // Clear epub jump target when leaving ebook — prevents stale value
+      // from re-triggering when EbookReader remounts on next visit
+      if (mode === 'ebook') setEpubTargetPercentage(null);
+
       Animated.sequence([
         Animated.timing(fadeAnim, { toValue: 0, duration: 150, useNativeDriver: true }),
         Animated.timing(fadeAnim, { toValue: 1, duration: 200, useNativeDriver: true }),

@@ -212,6 +212,13 @@ export function buildEpubHtml(theme: EpubTheme): string {
           book.locations.generate(1024).then(function() {
             locationsReady = true;
             log('locations.generate() done, count=' + book.locations.length());
+            // Re-emit current location with accurate percentage now that locations are ready
+            var loc = rendition.currentLocation();
+            if (loc && loc.start && loc.start.cfi) {
+              var pct = book.locations.percentageFromCfi(loc.start.cfi);
+              log('post-generate pct update: ' + pct);
+              send({ type: 'locationChanged', cfi: loc.start.cfi, percentage: pct });
+            }
           }).catch(function(err) {
             log('locations.generate() error: ' + (err && err.message ? err.message : String(err)));
           });
