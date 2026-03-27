@@ -107,6 +107,7 @@ export function buildEpubHtml(theme: EpubTheme): string {
     var rendition = null;
     var pendingCfi = null;
     var locationsReady = false;
+    var pendingPercentage = null;
 
     function send(data) {
       try {
@@ -159,6 +160,11 @@ export function buildEpubHtml(theme: EpubTheme): string {
           // Generate locations in the background for percentage-based navigation
           book.locations.generate(1024).then(function() {
             locationsReady = true;
+            if (pendingPercentage !== null) {
+              var cfi = book.locations.cfiFromPercentage(pendingPercentage);
+              if (cfi) rendition.display(cfi);
+              pendingPercentage = null;
+            }
           }).catch(function() {});
         }).catch(function(err) {
           showError(err && err.message ? err.message : String(err));
@@ -248,9 +254,11 @@ export function buildEpubHtml(theme: EpubTheme): string {
             if (rendition) rendition.display(data.cfi);
             break;
           case 'goToPercentage':
-            if (rendition && locationsReady) {
+            if (locationsReady) {
               var targetCfi = book.locations.cfiFromPercentage(data.percentage);
               if (targetCfi) rendition.display(targetCfi);
+            } else {
+              pendingPercentage = data.percentage;
             }
             break;
           case 'setTheme':

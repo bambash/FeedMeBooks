@@ -1,3 +1,4 @@
+import { Audio } from 'expo-av';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
@@ -56,6 +57,38 @@ export default function ReaderScreen() {
     if (book) setLastMode(book.id, mode);
   }, [mode]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Pre-scan durations for all audio tracks so the full book length is known
+  // immediately, not just after each track is played.
+  useEffect(() => {
+    const uris = book?.audioUris;
+    const bookId = book?.id;
+    if (!uris?.length || !bookId) return;
+
+    let cancelled = false;
+    const cached = book.session.audioFileDurations ?? [];
+
+    (async () => {
+      for (let i = 0; i < uris.length; i++) {
+        if (cancelled) break;
+        if (cached[i] != null && cached[i] > 0) continue; // already known
+        try {
+          const { sound, status } = await Audio.Sound.createAsync(
+            { uri: uris[i] },
+            { shouldPlay: false },
+          );
+          if (!cancelled && status.isLoaded && status.durationMillis) {
+            updateAudioFileDuration(bookId, i, status.durationMillis / 1000);
+          }
+          await sound.unloadAsync();
+        } catch {
+          // skip unreadable file
+        }
+      }
+    })();
+
+    return () => { cancelled = true; };
+  }, [book?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+
   const switchMode = useCallback(
     (next: ReaderMode) => {
       if (next === mode) return;
@@ -63,12 +96,13 @@ export default function ReaderScreen() {
       const b = bookRef.current;
       if (b) {
         const durations = b.session.audioFileDurations ?? [];
-        const totalDuration = durations.reduce((s, d) => s + d, 0);
+        // Use ?? 0 so sparse/missing entries don't produce NaN
+        const totalDuration = durations.reduce((s, d) => s + (d ?? 0), 0);
 
         if (mode === 'audio' && next === 'ebook' && totalDuration > 0) {
           // Compute audio percentage → offer jump in ebook
           const elapsed =
-            durations.slice(0, b.session.audioFileIndex).reduce((s, d) => s + d, 0) +
+            durations.slice(0, b.session.audioFileIndex).reduce((s, d) => s + (d ?? 0), 0) +
             b.session.audioPosition;
           const pct = Math.min(elapsed / totalDuration, 1);
           if (pct > 0.01) {
@@ -83,12 +117,13 @@ export default function ReaderScreen() {
             let targetFileIndex = durations.length - 1;
             let targetSeconds = durations[durations.length - 1] ?? 0;
             for (let i = 0; i < durations.length; i++) {
-              if (cumulative + durations[i] >= targetElapsed) {
+              const d = durations[i] ?? 0;
+              if (cumulative + d >= targetElapsed) {
                 targetFileIndex = i;
                 targetSeconds = targetElapsed - cumulative;
                 break;
               }
-              cumulative += durations[i];
+              cumulative += d;
             }
             setSyncBanner({ targetMode: 'audio', percentage: pct, targetFileIndex, targetSeconds });
           }
