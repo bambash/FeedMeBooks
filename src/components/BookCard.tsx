@@ -28,7 +28,7 @@ export default function BookCard({ book, onLongPress }: Props) {
   );
 
   const hasEbook = Boolean(book.ebookUri);
-  const hasAudio = Boolean(book.audioUri);
+  const hasAudio = Boolean(book.audioUris?.length);
 
   return (
     <Pressable

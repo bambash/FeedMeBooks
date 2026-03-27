@@ -73,6 +73,75 @@ export async function pickAudioFile(): Promise<DocumentPicker.DocumentPickerResu
   });
 }
 
+export async function pickAudioFiles(): Promise<DocumentPicker.DocumentPickerResult> {
+  return DocumentPicker.getDocumentAsync({
+    type: AUDIO_MIME_TYPES,
+    copyToCacheDirectory: true,
+    multiple: true,
+  });
+}
+
+/**
+ * Extract a human-readable filename from a SAF content:// URI.
+ * Tries multiple strategies to handle different storage providers.
+ */
+function extractSafFilename(safUri: string): string {
+  try {
+    const decoded = decodeURIComponent(safUri);
+
+    // Method 1: after /document/ segment (most common SAF format)
+    // URI: .../document/primary:Music/track01.mp3
+    if (decoded.includes('/document/')) {
+      const docId = decoded.split('/document/').pop()!;
+      const path = docId.includes(':') ? docId.split(':').slice(1).join(':') : docId;
+      const filename = path.split('/').pop();
+      if (filename && filename.includes('.')) return filename;
+    }
+
+    // Method 2: last path segment of decoded URI
+    const seg = decoded.split('/').pop();
+    if (seg && seg.includes('.')) return seg;
+
+    // Method 3: last segment of raw URI then decode
+    const rawSeg = safUri.split('/').pop();
+    if (rawSeg) {
+      const dec = decodeURIComponent(rawSeg);
+      const name = dec.includes(':') ? dec.split(':').pop()! : dec;
+      const filename = name.split('/').pop();
+      if (filename && filename.includes('.')) return filename;
+    }
+
+    return '';
+  } catch {
+    return safUri.split('/').pop() ?? '';
+  }
+}
+
+/**
+ * Open the Android folder picker (StorageAccessFramework) and return
+ * all audio files found directly inside the chosen directory.
+ * Returns SAF content:// URIs; FileSystem.copyAsync handles them via
+ * ContentResolver on Android.
+ */
+export async function pickAudioFolder(): Promise<{ uri: string; name: string }[]> {
+  const { StorageAccessFramework } = FileSystem;
+  const result = await StorageAccessFramework.requestDirectoryPermissionsAsync();
+  if (!result.granted) return [];
+
+  const fileUris = await StorageAccessFramework.readDirectoryAsync(result.directoryUri);
+  const audioFiles: { uri: string; name: string }[] = [];
+
+  for (const uri of fileUris) {
+    const name = extractSafFilename(uri);
+    if (!name) continue;
+    const ext = getExtension(name);
+    if (!isAudioExtension(ext)) continue;
+    audioFiles.push({ uri, name });
+  }
+
+  return audioFiles.sort((a, b) => a.name.localeCompare(b.name));
+}
+
 export async function pickCoverImage(): Promise<DocumentPicker.DocumentPickerResult> {
   return DocumentPicker.getDocumentAsync({
     type: ['image/jpeg', 'image/png', 'image/webp'],

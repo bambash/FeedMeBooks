@@ -1,9 +1,9 @@
 export type EbookFormat = 'epub' | 'pdf' | 'txt';
-export type AudioFormat = 'mp3' | 'wav' | 'm4a' | 'm4b' | 'aac' | 'ogg' | 'flac' | 'opus';
+export type AudioFormat = 'mp3' | 'wav' | 'm4a' | 'm4b' | 'mp4' | 'aac' | 'ogg' | 'flac' | 'opus';
 export type ReaderMode = 'ebook' | 'audio';
 
 export const SUPPORTED_EBOOK_EXTENSIONS: EbookFormat[] = ['epub', 'pdf', 'txt'];
-export const SUPPORTED_AUDIO_EXTENSIONS: AudioFormat[] = ['mp3', 'wav', 'm4a', 'm4b', 'aac', 'ogg', 'flac', 'opus'];
+export const SUPPORTED_AUDIO_EXTENSIONS: AudioFormat[] = ['mp3', 'wav', 'm4a', 'm4b', 'mp4', 'aac', 'ogg', 'flac', 'opus'];
 
 export const EBOOK_MIME_TYPES = [
   'application/epub+zip',
@@ -16,6 +16,7 @@ export const AUDIO_MIME_TYPES = [
   'audio/wav',
   'audio/x-wav',
   'audio/mp4',
+  'video/mp4',
   'audio/x-m4a',
   'audio/m4b',
   'audio/aac',
@@ -38,7 +39,8 @@ export interface EbookPosition {
 
 export interface BookSession {
   ebookPosition: EbookPosition;
-  audioPosition: number; // seconds
+  audioPosition: number; // seconds within the current audio file
+  audioFileIndex: number; // index into book.audioUris
   lastMode: ReaderMode;
   lastOpenedAt: number; // unix ms
 }
@@ -49,7 +51,7 @@ export interface Book {
   author: string;
   ebookUri?: string;
   ebookFormat?: EbookFormat;
-  audioUri?: string;
+  audioUris?: string[]; // ordered list; single-file books have length 1
   audioFormat?: AudioFormat;
   coverUri?: string;
   session: BookSession;

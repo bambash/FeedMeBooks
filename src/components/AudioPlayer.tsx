@@ -13,22 +13,25 @@ import { formatDuration } from '../utils/fileUtils';
 const SPEEDS = [0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0];
 
 interface Props {
-  uri: string;
-  savedPosition: number; // seconds
-  onPositionChange: (seconds: number) => void;
+  uris: string[];
+  fileIndex: number; // saved track index
+  savedPosition: number; // seconds within that track
+  onPositionChange: (fileIndex: number, seconds: number) => void;
   bookTitle: string;
   /** If true, renders a compact strip instead of the full player */
   compact?: boolean;
 }
 
 export default function AudioPlayer({
-  uri,
+  uris,
+  fileIndex,
   savedPosition,
   onPositionChange,
   bookTitle,
   compact = false,
 }: Props) {
   const soundRef = useRef<Audio.Sound | null>(null);
+  const [currentIndex, setCurrentIndex] = useState(fileIndex);
   const [status, setStatus] = useState<{
     isLoaded: boolean;
     isPlaying: boolean;
@@ -39,11 +42,25 @@ export default function AudioPlayer({
   const [speedIndex, setSpeedIndex] = useState(2); // 1.0x
   const [loading, setLoading] = useState(true);
   const positionSaveTimer = useRef<ReturnType<typeof setInterval> | null>(null);
-  const isSeeking = useRef(false);
 
-  // Load sound
+  // Keep refs current so callbacks inside effects see latest values
+  const urisRef = useRef(uris);
+  urisRef.current = uris;
+  const onPositionChangeRef = useRef(onPositionChange);
+  onPositionChangeRef.current = onPositionChange;
+  const currentIndexRef = useRef(currentIndex);
+  currentIndexRef.current = currentIndex;
+  const speedIndexRef = useRef(speedIndex);
+  speedIndexRef.current = speedIndex;
+
+  // Load sound whenever the active track changes
   useEffect(() => {
     let sound: Audio.Sound | null = null;
+    const uri = urisRef.current[currentIndex];
+    if (!uri) return;
+
+    setLoading(true);
+    setStatus({ isLoaded: false, isPlaying: false, positionMs: 0, durationMs: 0, isBuffering: false });
 
     (async () => {
       try {
@@ -54,15 +71,37 @@ export default function AudioPlayer({
           shouldDuckAndroid: true,
         });
 
+        const startMs = currentIndex === fileIndex ? savedPosition * 1000 : 0;
+
         const { sound: s } = await Audio.Sound.createAsync(
           { uri },
           {
             shouldPlay: false,
-            positionMillis: savedPosition * 1000,
-            rate: SPEEDS[speedIndex],
+            positionMillis: startMs,
+            rate: SPEEDS[speedIndexRef.current],
             shouldCorrectPitch: true,
           },
-          (st) => updateStatus(st),
+          (st) => {
+            if (!st.isLoaded) {
+              if (st.error) console.error('Playback error:', st.error);
+              return;
+            }
+            if (st.didJustFinish) {
+              const next = currentIndexRef.current + 1;
+              if (next < urisRef.current.length) {
+                onPositionChangeRef.current(next, 0);
+                setCurrentIndex(next);
+              }
+              return;
+            }
+            setStatus({
+              isLoaded: true,
+              isPlaying: st.isPlaying,
+              positionMs: st.positionMillis,
+              durationMs: st.durationMillis ?? 0,
+              isBuffering: st.isBuffering,
+            });
+          },
         );
         sound = s;
         soundRef.current = s;
@@ -77,13 +116,13 @@ export default function AudioPlayer({
       sound?.unloadAsync().catch(() => {});
       soundRef.current = null;
     };
-  }, [uri]);
+  }, [currentIndex]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Persist position every 5 seconds while playing
   useEffect(() => {
     if (status.isPlaying) {
       positionSaveTimer.current = setInterval(() => {
-        onPositionChange(status.positionMs / 1000);
+        onPositionChange(currentIndex, status.positionMs / 1000);
       }, 5000);
     } else {
       if (positionSaveTimer.current) clearInterval(positionSaveTimer.current);
@@ -91,41 +130,41 @@ export default function AudioPlayer({
     return () => {
       if (positionSaveTimer.current) clearInterval(positionSaveTimer.current);
     };
-  }, [status.isPlaying, status.positionMs, onPositionChange]);
-
-  const updateStatus = useCallback((st: AVPlaybackStatus) => {
-    if (st.isLoaded) {
-      setStatus({
-        isLoaded: true,
-        isPlaying: st.isPlaying,
-        positionMs: st.positionMillis,
-        durationMs: st.durationMillis ?? 0,
-        isBuffering: st.isBuffering,
-      });
-    } else if (st.error) {
-      console.error('Playback error:', st.error);
-    }
-  }, []);
+  }, [status.isPlaying, status.positionMs, currentIndex, onPositionChange]);
 
   const togglePlay = useCallback(async () => {
     if (!soundRef.current) return;
     if (status.isPlaying) {
       await soundRef.current.pauseAsync();
-      onPositionChange(status.positionMs / 1000);
+      onPositionChange(currentIndex, status.positionMs / 1000);
     } else {
       await soundRef.current.playAsync();
     }
-  }, [status.isPlaying, status.positionMs, onPositionChange]);
+  }, [status.isPlaying, status.positionMs, currentIndex, onPositionChange]);
 
   const seek = useCallback(async (seconds: number) => {
     if (!soundRef.current) return;
     const ms = Math.max(0, Math.min(seconds * 1000, status.durationMs));
     await soundRef.current.setPositionAsync(ms);
-    onPositionChange(ms / 1000);
-  }, [status.durationMs, onPositionChange]);
+    onPositionChange(currentIndex, ms / 1000);
+  }, [status.durationMs, currentIndex, onPositionChange]);
 
   const skipBack = useCallback(() => seek((status.positionMs / 1000) - 15), [seek, status.positionMs]);
   const skipForward = useCallback(() => seek((status.positionMs / 1000) + 30), [seek, status.positionMs]);
+
+  const prevTrack = useCallback(() => {
+    if (currentIndex > 0) {
+      onPositionChange(currentIndex - 1, 0);
+      setCurrentIndex(currentIndex - 1);
+    }
+  }, [currentIndex, onPositionChange]);
+
+  const nextTrack = useCallback(() => {
+    if (currentIndex < uris.length - 1) {
+      onPositionChange(currentIndex + 1, 0);
+      setCurrentIndex(currentIndex + 1);
+    }
+  }, [currentIndex, uris.length, onPositionChange]);
 
   const cycleSpeed = useCallback(async () => {
     const nextIndex = (speedIndex + 1) % SPEEDS.length;
@@ -136,6 +175,7 @@ export default function AudioPlayer({
   }, [speedIndex]);
 
   const progress = status.durationMs > 0 ? status.positionMs / status.durationMs : 0;
+  const multiTrack = uris.length > 1;
 
   if (loading) {
     return (
@@ -152,8 +192,11 @@ export default function AudioPlayer({
       positionMs={status.positionMs}
       durationMs={status.durationMs}
       progress={progress}
+      trackLabel={multiTrack ? `${currentIndex + 1}/${uris.length}` : undefined}
       onTogglePlay={togglePlay}
       onSeek={seek}
+      onPrevTrack={multiTrack && currentIndex > 0 ? prevTrack : undefined}
+      onNextTrack={multiTrack && currentIndex < uris.length - 1 ? nextTrack : undefined}
     />;
   }
 
@@ -164,6 +207,11 @@ export default function AudioPlayer({
         <Text style={styles.albumArtIcon}>🎧</Text>
         <Text style={styles.albumTitle} numberOfLines={2}>{bookTitle}</Text>
       </View>
+
+      {/* Track indicator */}
+      {multiTrack && (
+        <Text style={styles.trackLabel}>Track {currentIndex + 1} / {uris.length}</Text>
+      )}
 
       {/* Time display */}
       <View style={styles.timeRow}>
@@ -180,9 +228,15 @@ export default function AudioPlayer({
 
       {/* Controls */}
       <View style={styles.controls}>
-        <Pressable style={styles.controlBtn} onPress={skipBack}>
-          <Text style={styles.controlIcon}>⟨15</Text>
-        </Pressable>
+        {multiTrack ? (
+          <Pressable style={[styles.controlBtn, currentIndex === 0 && styles.controlBtnDisabled]} onPress={prevTrack} disabled={currentIndex === 0}>
+            <Text style={styles.controlIcon}>⏮</Text>
+          </Pressable>
+        ) : (
+          <Pressable style={styles.controlBtn} onPress={skipBack}>
+            <Text style={styles.controlIcon}>⟨15</Text>
+          </Pressable>
+        )}
 
         <Pressable style={styles.playBtn} onPress={togglePlay}>
           {status.isBuffering ? (
@@ -192,10 +246,28 @@ export default function AudioPlayer({
           )}
         </Pressable>
 
-        <Pressable style={styles.controlBtn} onPress={skipForward}>
-          <Text style={styles.controlIcon}>30⟩</Text>
-        </Pressable>
+        {multiTrack ? (
+          <Pressable style={[styles.controlBtn, currentIndex === uris.length - 1 && styles.controlBtnDisabled]} onPress={nextTrack} disabled={currentIndex === uris.length - 1}>
+            <Text style={styles.controlIcon}>⏭</Text>
+          </Pressable>
+        ) : (
+          <Pressable style={styles.controlBtn} onPress={skipForward}>
+            <Text style={styles.controlIcon}>30⟩</Text>
+          </Pressable>
+        )}
       </View>
+
+      {/* Skip buttons shown below when multi-track */}
+      {multiTrack && (
+        <View style={styles.skipRow}>
+          <Pressable style={styles.controlBtn} onPress={skipBack}>
+            <Text style={styles.controlIcon}>⟨15</Text>
+          </Pressable>
+          <Pressable style={styles.controlBtn} onPress={skipForward}>
+            <Text style={styles.controlIcon}>30⟩</Text>
+          </Pressable>
+        </View>
+      )}
 
       {/* Speed */}
       <Pressable style={styles.speedBtn} onPress={cycleSpeed}>
@@ -247,8 +319,11 @@ interface CompactPlayerProps {
   positionMs: number;
   durationMs: number;
   progress: number;
+  trackLabel?: string;
   onTogglePlay: () => void;
   onSeek: (seconds: number) => void;
+  onPrevTrack?: () => void;
+  onNextTrack?: () => void;
 }
 
 function CompactPlayer({
@@ -257,14 +332,22 @@ function CompactPlayer({
   positionMs,
   durationMs,
   progress,
+  trackLabel,
   onTogglePlay,
   onSeek,
+  onPrevTrack,
+  onNextTrack,
 }: CompactPlayerProps) {
   return (
     <View style={styles.compactContainer}>
       <SeekBar progress={progress} durationMs={durationMs} onSeek={onSeek} />
       <View style={styles.compactRow}>
         <Text style={styles.compactTime}>{formatDuration(positionMs / 1000)}</Text>
+        {onPrevTrack && (
+          <Pressable style={styles.compactTrackBtn} onPress={onPrevTrack}>
+            <Text style={styles.compactTrackIcon}>⏮</Text>
+          </Pressable>
+        )}
         <Pressable style={styles.compactPlayBtn} onPress={onTogglePlay}>
           {isBuffering ? (
             <ActivityIndicator size="small" color={colors.white} />
@@ -272,7 +355,16 @@ function CompactPlayer({
             <Text style={styles.compactPlayIcon}>{isPlaying ? '⏸' : '▶'}</Text>
           )}
         </Pressable>
-        <Text style={styles.compactTime}>{formatDuration(durationMs / 1000)}</Text>
+        {onNextTrack && (
+          <Pressable style={styles.compactTrackBtn} onPress={onNextTrack}>
+            <Text style={styles.compactTrackIcon}>⏭</Text>
+          </Pressable>
+        )}
+        {trackLabel ? (
+          <Text style={styles.compactTrackLabel}>{trackLabel}</Text>
+        ) : (
+          <Text style={styles.compactTime}>{formatDuration(durationMs / 1000)}</Text>
+        )}
       </View>
     </View>
   );
@@ -390,6 +482,20 @@ const styles = StyleSheet.create({
     color: colors.white,
     marginLeft: 4,
   },
+  trackLabel: {
+    ...typography.small,
+    color: colors.textMuted,
+    marginBottom: spacing.sm,
+    fontVariant: ['tabular-nums'],
+  },
+  skipRow: {
+    flexDirection: 'row',
+    gap: spacing.xl,
+    marginBottom: spacing.sm,
+  },
+  controlBtnDisabled: {
+    opacity: 0.3,
+  },
   speedBtn: {
     backgroundColor: colors.surfaceHigh,
     borderRadius: radius.full,
@@ -435,5 +541,19 @@ const styles = StyleSheet.create({
     fontSize: 16,
     color: colors.white,
     marginLeft: 2,
+  },
+  compactTrackBtn: {
+    padding: spacing.xs,
+  },
+  compactTrackIcon: {
+    fontSize: 14,
+    color: colors.textMuted,
+  },
+  compactTrackLabel: {
+    ...typography.tiny,
+    color: colors.textMuted,
+    fontVariant: ['tabular-nums'],
+    width: 50,
+    textAlign: 'center',
   },
 });

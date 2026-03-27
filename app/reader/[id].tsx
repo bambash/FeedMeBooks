@@ -61,8 +61,8 @@ export default function ReaderScreen() {
   );
 
   const handleAudioPositionChange = useCallback(
-    (seconds: number) => {
-      if (book) updateAudioPosition(book.id, seconds);
+    (fileIndex: number, seconds: number) => {
+      if (book) updateAudioPosition(book.id, fileIndex, seconds);
     },
     [book, updateAudioPosition],
   );
@@ -70,7 +70,7 @@ export default function ReaderScreen() {
   if (!book) return null;
 
   const canEbook = Boolean(book.ebookUri && book.ebookFormat);
-  const canAudio = Boolean(book.audioUri);
+  const canAudio = Boolean(book.audioUris?.length);
   const activeMode = mode === 'ebook' && canEbook ? 'ebook'
     : mode === 'audio' && canAudio ? 'audio'
     : canEbook ? 'ebook' : 'audio';
@@ -150,7 +150,8 @@ export default function ReaderScreen() {
             {/* Compact audio strip while reading — if audio exists */}
             {canAudio && (
               <AudioPlayer
-                uri={book.audioUri!}
+                uris={book.audioUris!}
+                fileIndex={book.session.audioFileIndex}
                 savedPosition={book.session.audioPosition}
                 onPositionChange={handleAudioPositionChange}
                 bookTitle={book.title}
@@ -160,7 +161,8 @@ export default function ReaderScreen() {
           </>
         ) : activeMode === 'audio' && canAudio ? (
           <AudioPlayer
-            uri={book.audioUri!}
+            uris={book.audioUris!}
+            fileIndex={book.session.audioFileIndex}
             savedPosition={book.session.audioPosition}
             onPositionChange={handleAudioPositionChange}
             bookTitle={book.title}

@@ -1,6 +1,6 @@
 import * as FileSystem from 'expo-file-system';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { ActivityIndicator, StyleSheet, View } from 'react-native';
+import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-native';
 import WebView, { type WebViewMessageEvent } from 'react-native-webview';
 import { colors } from '../../theme';
 import type { EbookPosition } from '../../types';
@@ -86,6 +86,9 @@ export default function EpubReader({
 
   const htmlContent = buildEpubHtml(theme);
 
+  const goNext = useCallback(() => sendToWebView({ type: 'next' }), [sendToWebView]);
+  const goPrev = useCallback(() => sendToWebView({ type: 'prev' }), [sendToWebView]);
+
   return (
     <View style={styles.container}>
       {loading && (
@@ -107,6 +110,25 @@ export default function EpubReader({
         allowUniversalAccessFromFileURLs
         mixedContentMode="always"
       />
+      {/* React Native overlay nav buttons — more reliable than WebView touch events */}
+      {!loading && (
+        <>
+          <Pressable
+            style={({ pressed }) => [styles.navBtn, styles.navPrev, pressed && styles.navBtnActive]}
+            onPress={goPrev}
+            hitSlop={8}
+          >
+            <Text style={styles.navArrow}>‹</Text>
+          </Pressable>
+          <Pressable
+            style={({ pressed }) => [styles.navBtn, styles.navNext, pressed && styles.navBtnActive]}
+            onPress={goNext}
+            hitSlop={8}
+          >
+            <Text style={styles.navArrow}>›</Text>
+          </Pressable>
+        </>
+      )}
     </View>
   );
 }
@@ -126,5 +148,27 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     backgroundColor: colors.bg,
     zIndex: 10,
+  },
+  navBtn: {
+    position: 'absolute',
+    top: 0,
+    bottom: 0,
+    width: 44,
+    alignItems: 'center',
+    justifyContent: 'center',
+    zIndex: 5,
+    opacity: 0.35,
+  },
+  navBtnActive: {
+    opacity: 0.85,
+    backgroundColor: 'rgba(124,58,237,0.12)',
+  },
+  navPrev: { left: 0 },
+  navNext: { right: 0 },
+  navArrow: {
+    fontSize: 36,
+    color: colors.text,
+    fontWeight: '300',
+    lineHeight: 40,
   },
 });
