@@ -9,6 +9,7 @@
  *     { type: 'next' }
  *     { type: 'prev' }
  *     { type: 'goToCfi', cfi: string }
+ *     { type: 'goToPercentage', percentage: number }  // 0-1, requires locations to be generated
  *     { type: 'setTheme', theme: ThemeData }
  *     { type: 'setFontSize', size: number }
  *
@@ -105,6 +106,7 @@ export function buildEpubHtml(theme: EpubTheme): string {
     var book = null;
     var rendition = null;
     var pendingCfi = null;
+    var locationsReady = false;
 
     function send(data) {
       try {
@@ -154,6 +156,10 @@ export function buildEpubHtml(theme: EpubTheme): string {
         rendition.display(displayCfi).then(function() {
           document.getElementById('loading').style.display = 'none';
           send({ type: 'ready' });
+          // Generate locations in the background for percentage-based navigation
+          book.locations.generate(1024).then(function() {
+            locationsReady = true;
+          }).catch(function() {});
         }).catch(function(err) {
           showError(err && err.message ? err.message : String(err));
         });
@@ -240,6 +246,12 @@ export function buildEpubHtml(theme: EpubTheme): string {
             break;
           case 'goToCfi':
             if (rendition) rendition.display(data.cfi);
+            break;
+          case 'goToPercentage':
+            if (rendition && locationsReady) {
+              var targetCfi = book.locations.cfiFromPercentage(data.percentage);
+              if (targetCfi) rendition.display(targetCfi);
+            }
             break;
           case 'setTheme':
             applyTheme(data.theme);

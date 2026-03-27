@@ -3,7 +3,6 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   Animated,
   Pressable,
-  SafeAreaView,
   StyleSheet,
   Text,
   View,
@@ -15,35 +14,87 @@ import { useLibraryStore } from '../../src/store/libraryStore';
 import { colors, radius, spacing, typography } from '../../src/theme';
 import type { EbookPosition, ReaderMode } from '../../src/types';
 
+interface SyncBanner {
+  targetMode: ReaderMode;
+  /** 0–1 fractional position to jump to in the target mode */
+  percentage: number;
+  /** Pre-computed audio seek target (only set when targetMode === 'audio') */
+  targetFileIndex?: number;
+  targetSeconds?: number;
+}
+
 export default function ReaderScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const router = useRouter();
   const insets = useSafeAreaInsets();
 
-  const { getBook, updateEbookPosition, updateAudioPosition, setLastMode } = useLibraryStore();
+  const { getBook, updateEbookPosition, updateAudioPosition, updateAudioFileDuration, setLastMode } =
+    useLibraryStore();
   const book = getBook(id);
 
   const [mode, setMode] = useState<ReaderMode>(book?.session.lastMode ?? 'ebook');
   const [showSettings, setShowSettings] = useState(false);
   const [darkMode, setDarkMode] = useState(true);
   const [fontSize, setFontSize] = useState(18);
+  const [syncBanner, setSyncBanner] = useState<SyncBanner | null>(null);
+  /** When non-null, EpubReader will navigate to this percentage (0-1) */
+  const [epubTargetPercentage, setEpubTargetPercentage] = useState<number | null>(null);
+  /** Bump to remount AudioPlayer and apply a new seeked position from the store */
+  const [audioPlayerKey, setAudioPlayerKey] = useState(0);
 
-  // Animate mode switch
   const fadeAnim = useRef(new Animated.Value(1)).current;
 
+  // Keep a ref to the latest book so switchMode can read session without stale closure
+  const bookRef = useRef(book);
+  bookRef.current = book;
+
   useEffect(() => {
-    if (!book) {
-      router.back();
-    }
+    if (!book) router.back();
   }, [book, router]);
 
   useEffect(() => {
     if (book) setLastMode(book.id, mode);
-  }, [mode]);
+  }, [mode]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const switchMode = useCallback(
     (next: ReaderMode) => {
       if (next === mode) return;
+
+      const b = bookRef.current;
+      if (b) {
+        const durations = b.session.audioFileDurations ?? [];
+        const totalDuration = durations.reduce((s, d) => s + d, 0);
+
+        if (mode === 'audio' && next === 'ebook' && totalDuration > 0) {
+          // Compute audio percentage → offer jump in ebook
+          const elapsed =
+            durations.slice(0, b.session.audioFileIndex).reduce((s, d) => s + d, 0) +
+            b.session.audioPosition;
+          const pct = Math.min(elapsed / totalDuration, 1);
+          if (pct > 0.01) {
+            setSyncBanner({ targetMode: 'ebook', percentage: pct });
+          }
+        } else if (mode === 'ebook' && next === 'audio' && totalDuration > 0) {
+          // Compute ebook percentage → offer jump in audiobook
+          const pct = b.session.ebookPosition.percentage;
+          if (pct > 0.01) {
+            const targetElapsed = pct * totalDuration;
+            let cumulative = 0;
+            let targetFileIndex = durations.length - 1;
+            let targetSeconds = durations[durations.length - 1] ?? 0;
+            for (let i = 0; i < durations.length; i++) {
+              if (cumulative + durations[i] >= targetElapsed) {
+                targetFileIndex = i;
+                targetSeconds = targetElapsed - cumulative;
+                break;
+              }
+              cumulative += durations[i];
+            }
+            setSyncBanner({ targetMode: 'audio', percentage: pct, targetFileIndex, targetSeconds });
+          }
+        }
+      }
+
       Animated.sequence([
         Animated.timing(fadeAnim, { toValue: 0, duration: 150, useNativeDriver: true }),
         Animated.timing(fadeAnim, { toValue: 1, duration: 200, useNativeDriver: true }),
@@ -52,6 +103,18 @@ export default function ReaderScreen() {
     },
     [mode, fadeAnim],
   );
+
+  const handleSyncAccept = useCallback(() => {
+    const b = bookRef.current;
+    if (!syncBanner || !b) return;
+    if (syncBanner.targetMode === 'ebook') {
+      setEpubTargetPercentage(syncBanner.percentage);
+    } else {
+      updateAudioPosition(b.id, syncBanner.targetFileIndex ?? 0, syncBanner.targetSeconds ?? 0);
+      setAudioPlayerKey((k) => k + 1);
+    }
+    setSyncBanner(null);
+  }, [syncBanner, updateAudioPosition]);
 
   const handleEbookPositionChange = useCallback(
     (position: Partial<EbookPosition>) => {
@@ -67,11 +130,19 @@ export default function ReaderScreen() {
     [book, updateAudioPosition],
   );
 
+  const handleDurationLoaded = useCallback(
+    (fileIndex: number, seconds: number) => {
+      if (book) updateAudioFileDuration(book.id, fileIndex, seconds);
+    },
+    [book, updateAudioFileDuration],
+  );
+
   if (!book) return null;
 
   const canEbook = Boolean(book.ebookUri && book.ebookFormat);
   const canAudio = Boolean(book.audioUris?.length);
-  const activeMode = mode === 'ebook' && canEbook ? 'ebook'
+  const activeMode =
+    mode === 'ebook' && canEbook ? 'ebook'
     : mode === 'audio' && canAudio ? 'audio'
     : canEbook ? 'ebook' : 'audio';
 
@@ -135,6 +206,24 @@ export default function ReaderScreen() {
         )}
       </View>
 
+      {/* Sync banner */}
+      {syncBanner && (
+        <View style={styles.syncBanner}>
+          <Text style={styles.syncBannerText}>
+            Jump to {Math.round(syncBanner.percentage * 100)}% — where you left off{' '}
+            {syncBanner.targetMode === 'ebook' ? 'listening' : 'reading'}?
+          </Text>
+          <View style={styles.syncBannerActions}>
+            <Pressable style={styles.syncAccept} onPress={handleSyncAccept}>
+              <Text style={styles.syncAcceptText}>Jump</Text>
+            </Pressable>
+            <Pressable style={styles.syncDismiss} onPress={() => setSyncBanner(null)}>
+              <Text style={styles.syncDismissText}>Skip</Text>
+            </Pressable>
+          </View>
+        </View>
+      )}
+
       {/* Content */}
       <Animated.View style={[styles.content, { opacity: fadeAnim }]}>
         {activeMode === 'ebook' && canEbook ? (
@@ -146,14 +235,17 @@ export default function ReaderScreen() {
               onPositionChange={handleEbookPositionChange}
               darkMode={darkMode}
               fontSize={fontSize}
+              targetPercentage={epubTargetPercentage}
             />
             {/* Compact audio strip while reading — if audio exists */}
             {canAudio && (
               <AudioPlayer
+                key={audioPlayerKey}
                 uris={book.audioUris!}
                 fileIndex={book.session.audioFileIndex}
                 savedPosition={book.session.audioPosition}
                 onPositionChange={handleAudioPositionChange}
+                onDurationLoaded={handleDurationLoaded}
                 bookTitle={book.title}
                 compact
               />
@@ -161,10 +253,12 @@ export default function ReaderScreen() {
           </>
         ) : activeMode === 'audio' && canAudio ? (
           <AudioPlayer
+            key={audioPlayerKey}
             uris={book.audioUris!}
             fileIndex={book.session.audioFileIndex}
             savedPosition={book.session.audioPosition}
             onPositionChange={handleAudioPositionChange}
+            onDurationLoaded={handleDurationLoaded}
             bookTitle={book.title}
           />
         ) : null}
@@ -372,5 +466,44 @@ const styles = StyleSheet.create({
   },
   content: {
     flex: 1,
+  },
+  syncBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    backgroundColor: colors.primaryDim,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.border,
+    gap: spacing.sm,
+  },
+  syncBannerText: {
+    ...typography.small,
+    color: colors.primaryLight,
+    flex: 1,
+  },
+  syncBannerActions: {
+    flexDirection: 'row',
+    gap: spacing.sm,
+  },
+  syncAccept: {
+    backgroundColor: colors.primary,
+    borderRadius: radius.full,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.xs,
+  },
+  syncAcceptText: {
+    ...typography.small,
+    color: colors.white,
+    fontWeight: '700',
+  },
+  syncDismiss: {
+    paddingHorizontal: spacing.sm,
+    paddingVertical: spacing.xs,
+  },
+  syncDismissText: {
+    ...typography.small,
+    color: colors.textMuted,
   },
 });

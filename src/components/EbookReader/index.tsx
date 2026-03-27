@@ -13,6 +13,7 @@ interface Props {
   onPositionChange: (position: Partial<EbookPosition>) => void;
   darkMode?: boolean;
   fontSize?: number;
+  targetPercentage?: number | null;
 }
 
 export default function EbookReader({
@@ -22,6 +23,7 @@ export default function EbookReader({
   onPositionChange,
   darkMode = true,
   fontSize = 18,
+  targetPercentage,
 }: Props) {
   switch (format) {
     case 'epub':
@@ -32,6 +34,7 @@ export default function EbookReader({
           onPositionChange={onPositionChange}
           darkMode={darkMode}
           fontSize={fontSize}
+          targetPercentage={targetPercentage}
         />
       );
     case 'pdf':

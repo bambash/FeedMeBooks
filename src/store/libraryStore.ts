@@ -13,6 +13,7 @@ interface LibraryState {
   updateSession: (id: string, session: Partial<BookSession>) => void;
   updateEbookPosition: (id: string, position: Partial<EbookPosition>) => void;
   updateAudioPosition: (id: string, fileIndex: number, positionSeconds: number) => void;
+  updateAudioFileDuration: (id: string, fileIndex: number, durationSeconds: number) => void;
   setLastMode: (id: string, mode: ReaderMode) => void;
   getBook: (id: string) => Book | undefined;
 }
@@ -21,6 +22,7 @@ const defaultSession = (): BookSession => ({
   ebookPosition: { percentage: 0 },
   audioPosition: 0,
   audioFileIndex: 0,
+  audioFileDurations: [],
   lastMode: 'ebook',
   lastOpenedAt: Date.now(),
 });
@@ -80,6 +82,17 @@ export const useLibraryStore = create<LibraryState>()(
               ? { ...b, session: { ...b.session, audioFileIndex: fileIndex, audioPosition: positionSeconds } }
               : b,
           ),
+        }));
+      },
+
+      updateAudioFileDuration: (id, fileIndex, durationSeconds) => {
+        set((state) => ({
+          books: state.books.map((b) => {
+            if (b.id !== id) return b;
+            const durations = [...(b.session.audioFileDurations ?? [])];
+            durations[fileIndex] = durationSeconds;
+            return { ...b, session: { ...b.session, audioFileDurations: durations } };
+          }),
         }));
       },
 

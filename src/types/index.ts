@@ -41,6 +41,8 @@ export interface BookSession {
   ebookPosition: EbookPosition;
   audioPosition: number; // seconds within the current audio file
   audioFileIndex: number; // index into book.audioUris
+  /** Cached duration (seconds) of each audio file, populated as tracks are played */
+  audioFileDurations: number[];
   lastMode: ReaderMode;
   lastOpenedAt: number; // unix ms
 }
