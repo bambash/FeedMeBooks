@@ -14,6 +14,7 @@ interface Props {
   darkMode?: boolean;
   fontSize?: number;
   targetPercentage?: number | null;
+  onLog?: (message: string) => void;
 }
 
 export default function EbookReader({
@@ -24,6 +25,7 @@ export default function EbookReader({
   darkMode = true,
   fontSize = 18,
   targetPercentage,
+  onLog,
 }: Props) {
   switch (format) {
     case 'epub':
@@ -35,6 +37,7 @@ export default function EbookReader({
           darkMode={darkMode}
           fontSize={fontSize}
           targetPercentage={targetPercentage}
+          onLog={onLog}
         />
       );
     case 'pdf':

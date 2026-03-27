@@ -1,4 +1,5 @@
 import { Audio } from 'expo-av';
+import * as Clipboard from 'expo-clipboard';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
@@ -42,6 +43,8 @@ export default function ReaderScreen() {
   const [epubTargetPercentage, setEpubTargetPercentage] = useState<number | null>(null);
   /** Bump to remount AudioPlayer and apply a new seeked position from the store */
   const [audioPlayerKey, setAudioPlayerKey] = useState(0);
+  const [devMode, setDevMode] = useState(false);
+  const logsRef = useRef<string[]>([]);
 
   const fadeAnim = useRef(new Animated.Value(1)).current;
 
@@ -172,6 +175,16 @@ export default function ReaderScreen() {
     [book, updateAudioFileDuration],
   );
 
+  const handleLog = useCallback((message: string) => {
+    const ts = new Date().toISOString().slice(11, 23);
+    logsRef.current = [...logsRef.current, `${ts} ${message}`];
+  }, []);
+
+  const copyLogs = useCallback(async () => {
+    const text = logsRef.current.join('\n') || '(no logs yet)';
+    await Clipboard.setStringAsync(text);
+  }, []);
+
   if (!book) return null;
 
   const canEbook = Boolean(book.ebookUri && book.ebookFormat);
@@ -208,6 +221,9 @@ export default function ReaderScreen() {
           fontSize={fontSize}
           onToggleDark={() => setDarkMode((v) => !v)}
           onFontSizeChange={setFontSize}
+          devMode={devMode}
+          onToggleDev={() => setDevMode((v) => !v)}
+          onCopyLogs={copyLogs}
         />
       )}
 
@@ -271,6 +287,7 @@ export default function ReaderScreen() {
               darkMode={darkMode}
               fontSize={fontSize}
               targetPercentage={epubTargetPercentage}
+              onLog={devMode ? handleLog : undefined}
             />
             {/* Compact audio strip while reading — if audio exists */}
             {canAudio && (
@@ -313,14 +330,27 @@ function SettingsPanel({
   fontSize,
   onToggleDark,
   onFontSizeChange,
+  devMode,
+  onToggleDev,
+  onCopyLogs,
 }: {
   darkMode: boolean;
   fontSize: number;
   onToggleDark: () => void;
   onFontSizeChange: (size: number) => void;
+  devMode: boolean;
+  onToggleDev: () => void;
+  onCopyLogs: () => void;
 }) {
   const MIN = 14;
   const MAX = 28;
+  const [copied, setCopied] = React.useState(false);
+
+  const handleCopy = React.useCallback(async () => {
+    await onCopyLogs();
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  }, [onCopyLogs]);
 
   return (
     <View style={settingsStyles.panel}>
@@ -352,6 +382,24 @@ function SettingsPanel({
           </Pressable>
         </View>
       </View>
+
+      <View style={settingsStyles.row}>
+        <Text style={settingsStyles.label}>Dev Logging</Text>
+        <Pressable
+          style={[settingsStyles.toggle, devMode && settingsStyles.toggleOn]}
+          onPress={onToggleDev}
+        >
+          <View style={[settingsStyles.thumb, devMode && settingsStyles.thumbOn]} />
+        </Pressable>
+      </View>
+
+      {devMode && (
+        <Pressable style={settingsStyles.copyLogsBtn} onPress={handleCopy}>
+          <Text style={settingsStyles.copyLogsBtnText}>
+            {copied ? 'Copied!' : 'Copy Logs'}
+          </Text>
+        </Pressable>
+      )}
     </View>
   );
 }
@@ -416,6 +464,19 @@ const settingsStyles = StyleSheet.create({
     minWidth: 24,
     textAlign: 'center',
     fontVariant: ['tabular-nums'],
+  },
+  copyLogsBtn: {
+    alignSelf: 'flex-end',
+    backgroundColor: colors.surfaceHigh,
+    borderRadius: radius.sm,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.xs,
+    marginTop: spacing.xs,
+  },
+  copyLogsBtnText: {
+    ...typography.small,
+    color: colors.primaryLight,
+    fontWeight: '700',
   },
 });
 

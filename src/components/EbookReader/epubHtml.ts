@@ -117,22 +117,26 @@ export function buildEpubHtml(theme: EpubTheme): string {
      * - If the book isn't loaded yet: store as pendingPercentage for later.
      */
     function goToPercentage(pct) {
+      log('goToPercentage(' + pct.toFixed(4) + ') book=' + (book ? 'yes' : 'null') + ' locationsReady=' + locationsReady);
       if (!book || !rendition) {
         pendingPercentage = pct;
+        log('queued as pendingPercentage (book not loaded yet)');
         return;
       }
       if (locationsReady) {
         var cfi = book.locations.cfiFromPercentage(pct);
+        log('cfiFromPercentage → ' + (cfi ? cfi : 'null/empty'));
         if (cfi) {
           rendition.display(cfi);
           return;
         }
+        log('cfi was empty, falling through to spine fallback');
       }
       // Fallback: spine-item navigation (no locations needed, works immediately)
       var items = book.spine ? book.spine.items : [];
-      if (!items.length) return;
       var idx = Math.min(Math.floor(pct * items.length), items.length - 1);
       var item = items[idx];
+      log('spine fallback: spineCount=' + items.length + ' idx=' + idx + ' href=' + (item ? item.href : 'none'));
       if (item && item.href) rendition.display(item.href);
     }
 
@@ -142,6 +146,10 @@ export function buildEpubHtml(theme: EpubTheme): string {
           window.ReactNativeWebView.postMessage(JSON.stringify(data));
         }
       } catch(e) {}
+    }
+
+    function log(msg) {
+      send({ type: 'log', message: '[epub] ' + msg });
     }
 
     function showError(msg) {
@@ -184,8 +192,10 @@ export function buildEpubHtml(theme: EpubTheme): string {
         rendition.display(displayCfi).then(function() {
           document.getElementById('loading').style.display = 'none';
           send({ type: 'ready' });
+          log('book displayed, spineItems=' + (book.spine ? book.spine.items.length : 0));
           // Apply any percentage jump that arrived before the book was loaded
           if (pendingPercentage !== null) {
+            log('applying pendingPercentage=' + pendingPercentage);
             var pct = pendingPercentage;
             pendingPercentage = null;
             goToPercentage(pct);
@@ -193,7 +203,10 @@ export function buildEpubHtml(theme: EpubTheme): string {
           // Generate precise locations in background for future jumps
           book.locations.generate(1024).then(function() {
             locationsReady = true;
-          }).catch(function() {});
+            log('locations.generate() done, count=' + book.locations.length());
+          }).catch(function(err) {
+            log('locations.generate() error: ' + (err && err.message ? err.message : String(err)));
+          });
         }).catch(function(err) {
           showError(err && err.message ? err.message : String(err));
         });
