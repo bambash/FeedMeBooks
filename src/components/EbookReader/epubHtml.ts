@@ -127,17 +127,25 @@ export function buildEpubHtml(theme: EpubTheme): string {
         var cfi = book.locations.cfiFromPercentage(pct);
         log('cfiFromPercentage → ' + (cfi ? cfi : 'null/empty'));
         if (cfi) {
-          rendition.display(cfi);
+          rendition.display(cfi).then(function() {
+            log('display(cfi) resolved');
+          }).catch(function(e) {
+            log('display(cfi) error: ' + e);
+          });
           return;
         }
         log('cfi was empty, falling through to spine fallback');
       }
-      // Fallback: spine-item navigation (no locations needed, works immediately)
+      // Fallback: navigate by spine index (more reliable than href for base64-loaded epubs)
       var items = book.spine ? book.spine.items : [];
       var idx = Math.min(Math.floor(pct * items.length), items.length - 1);
       var item = items[idx];
       log('spine fallback: spineCount=' + items.length + ' idx=' + idx + ' href=' + (item ? item.href : 'none'));
-      if (item && item.href) rendition.display(item.href);
+      rendition.display(idx).then(function() {
+        log('display(idx=' + idx + ') resolved');
+      }).catch(function(e) {
+        log('display(idx) error: ' + e);
+      });
     }
 
     function send(data) {
@@ -212,6 +220,7 @@ export function buildEpubHtml(theme: EpubTheme): string {
         });
 
         rendition.on('relocated', function(location) {
+          log('relocated cfi=' + location.start.cfi + ' pct=' + (location.start.percentage || 0));
           send({
             type: 'locationChanged',
             cfi: location.start.cfi,
