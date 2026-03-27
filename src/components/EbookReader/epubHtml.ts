@@ -109,6 +109,33 @@ export function buildEpubHtml(theme: EpubTheme): string {
     var locationsReady = false;
     var pendingPercentage = null;
 
+    /**
+     * Navigate to a fractional position (0–1).
+     * - If precise locations are ready: use cfiFromPercentage.
+     * - Otherwise: navigate to the spine item nearest to that fraction
+     *   (chapter-level, but works immediately without location generation).
+     * - If the book isn't loaded yet: store as pendingPercentage for later.
+     */
+    function goToPercentage(pct) {
+      if (!book || !rendition) {
+        pendingPercentage = pct;
+        return;
+      }
+      if (locationsReady) {
+        var cfi = book.locations.cfiFromPercentage(pct);
+        if (cfi) {
+          rendition.display(cfi);
+          return;
+        }
+      }
+      // Fallback: spine-item navigation (no locations needed, works immediately)
+      var items = book.spine ? book.spine.items : [];
+      if (!items.length) return;
+      var idx = Math.min(Math.floor(pct * items.length), items.length - 1);
+      var item = items[idx];
+      if (item && item.href) rendition.display(item.href);
+    }
+
     function send(data) {
       try {
         if (window.ReactNativeWebView) {
@@ -157,14 +184,15 @@ export function buildEpubHtml(theme: EpubTheme): string {
         rendition.display(displayCfi).then(function() {
           document.getElementById('loading').style.display = 'none';
           send({ type: 'ready' });
-          // Generate locations in the background for percentage-based navigation
+          // Apply any percentage jump that arrived before the book was loaded
+          if (pendingPercentage !== null) {
+            var pct = pendingPercentage;
+            pendingPercentage = null;
+            goToPercentage(pct);
+          }
+          // Generate precise locations in background for future jumps
           book.locations.generate(1024).then(function() {
             locationsReady = true;
-            if (pendingPercentage !== null) {
-              var cfi = book.locations.cfiFromPercentage(pendingPercentage);
-              if (cfi) rendition.display(cfi);
-              pendingPercentage = null;
-            }
           }).catch(function() {});
         }).catch(function(err) {
           showError(err && err.message ? err.message : String(err));
@@ -254,12 +282,7 @@ export function buildEpubHtml(theme: EpubTheme): string {
             if (rendition) rendition.display(data.cfi);
             break;
           case 'goToPercentage':
-            if (locationsReady) {
-              var targetCfi = book.locations.cfiFromPercentage(data.percentage);
-              if (targetCfi) rendition.display(targetCfi);
-            } else {
-              pendingPercentage = data.percentage;
-            }
+            goToPercentage(data.percentage);
             break;
           case 'setTheme':
             applyTheme(data.theme);

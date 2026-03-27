@@ -34,6 +34,9 @@ export default function EpubReader({
   const base64Ref = useRef<string | null>(null);
   // Track last sent targetPercentage to avoid re-sending the same value
   const sentPercentageRef = useRef<number | null>(null);
+  // Always-current ref so onWebViewLoad can read the latest targetPercentage
+  const targetPercentageRef = useRef(targetPercentage ?? null);
+  targetPercentageRef.current = targetPercentage ?? null;
 
   const theme = {
     background: darkMode ? colors.bg : '#FAFAFA',
@@ -82,6 +85,12 @@ export default function EpubReader({
       bookSentRef.current = true;
       sendToWebView({ type: 'load', base64: base64Ref.current, cfi: savedPosition.cfi, theme: themeRef.current });
     }
+    // Deliver any percentage jump that arrived before the WebView was ready
+    const pct = targetPercentageRef.current;
+    if (pct != null && pct !== sentPercentageRef.current) {
+      sentPercentageRef.current = pct;
+      sendToWebView({ type: 'goToPercentage', percentage: pct });
+    }
   }, [savedPosition.cfi, sendToWebView]);
 
   // Send theme updates after book is loaded
@@ -95,7 +104,7 @@ export default function EpubReader({
   useEffect(() => {
     if (
       targetPercentage != null &&
-      bookSentRef.current &&
+      webViewReadyRef.current &&
       targetPercentage !== sentPercentageRef.current
     ) {
       sentPercentageRef.current = targetPercentage;
