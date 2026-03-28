@@ -137,13 +137,23 @@ export default function ReaderScreen() {
     });
   }, [book?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  const handleLog = useCallback((message: string) => {
+    const ts = new Date().toISOString().slice(11, 23);
+    const entry = `${ts} ${message}`;
+    logsRef.current = [...logsRef.current, entry];
+    setLogs((prev) => [...prev, entry]);
+  }, []);
+
   /** Called when epub.js finishes extracting chapter texts — continues the indexing pipeline */
   const handleTextExtracted = useCallback(
     async (chapters: ChapterText[]) => {
       chaptersRef.current = chapters;
       const b = bookRef.current;
+      handleLog(`[index] epub extracted ${chapters.length} chapters`);
       if (!b?.audioUris?.length || !chapters.length) {
-        setIndexStatus({ phase: 'error', progress: 0, error: 'No audio or ebook content found' });
+        const err = 'No audio or ebook content found';
+        handleLog(`[index] error: ${err}`);
+        setIndexStatus({ phase: 'error', progress: 0, error: err });
         return;
       }
 
@@ -151,11 +161,15 @@ export default function ReaderScreen() {
         // Download model if needed
         if (!(await isModelDownloaded())) {
           if (indexCancelledRef.current) return;
+          handleLog('[index] downloading whisper model…');
           setIndexStatus({ phase: 'downloading', progress: 0 });
           await downloadModel((p) => {
             if (!indexCancelledRef.current)
               setIndexStatus({ phase: 'downloading', progress: p });
           });
+          handleLog('[index] model download complete');
+        } else {
+          handleLog('[index] whisper model already downloaded');
         }
 
         if (indexCancelledRef.current) { releaseWhisperContext(); return; }
@@ -166,8 +180,11 @@ export default function ReaderScreen() {
         let cumulativeMs = 0;
         const allSegments: Awaited<ReturnType<typeof transcribeFile>> = [];
 
+        handleLog(`[index] transcribing ${audioUris.length} audio file(s)`);
         for (let i = 0; i < audioUris.length; i++) {
           if (indexCancelledRef.current) { releaseWhisperContext(); return; }
+          const fileName = audioUris[i].split('/').pop() ?? `file ${i + 1}`;
+          handleLog(`[index] transcribing file ${i + 1}/${audioUris.length}: ${fileName}`);
           setIndexStatus({ phase: 'transcribing', progress: i / audioUris.length, transcribeFileIndex: i });
           const segs = await transcribeFile(audioUris[i], (p) => {
             if (!indexCancelledRef.current)
@@ -177,6 +194,7 @@ export default function ReaderScreen() {
                 transcribeFileIndex: i,
               });
           });
+          handleLog(`[index] file ${i + 1} done — ${segs.length} segments`);
           // Offset segment timestamps so they're relative to the whole audiobook
           for (const s of segs) {
             allSegments.push({ ...s, t0Ms: s.t0Ms + cumulativeMs, t1Ms: s.t1Ms + cumulativeMs });
@@ -187,10 +205,12 @@ export default function ReaderScreen() {
         releaseWhisperContext();
         if (indexCancelledRef.current) return;
 
+        handleLog(`[index] aligning ${allSegments.length} segments to ${chapters.length} chapters…`);
         // Align transcript to epub chapters
         setIndexStatus({ phase: 'aligning', progress: 0 });
         let points = buildSyncPoints(allSegments, chaptersRef.current, cumulativeMs);
         points = fillFilePositions(points, fileDurationsMs);
+        handleLog(`[index] alignment done — ${points.length} sync points`);
 
         if (indexCancelledRef.current) return;
 
@@ -204,17 +224,20 @@ export default function ReaderScreen() {
         setSyncMapCreatedAt(b.id, map.createdAt);
         setSyncMap(map);
         setIndexStatus({ phase: 'done', progress: 1 });
+        handleLog('[index] sync map saved ✓');
       } catch (err) {
         releaseWhisperContext();
+        const msg = err instanceof Error ? err.message : String(err);
+        handleLog(`[index] error: ${msg}`);
         if (!indexCancelledRef.current)
           setIndexStatus({
             phase: 'error',
             progress: 0,
-            error: err instanceof Error ? err.message : String(err),
+            error: msg,
           });
       }
     },
-    [setSyncMapCreatedAt],
+    [setSyncMapCreatedAt, handleLog],
   );
 
   /** Start the sync index build: request epub text extraction first */
@@ -334,13 +357,6 @@ export default function ReaderScreen() {
     },
     [book, updateAudioFileDuration],
   );
-
-  const handleLog = useCallback((message: string) => {
-    const ts = new Date().toISOString().slice(11, 23);
-    const entry = `${ts} ${message}`;
-    logsRef.current = [...logsRef.current, entry];
-    setLogs((prev) => [...prev, entry]);
-  }, []);
 
   const copyLogs = useCallback(async () => {
     const text = logsRef.current.join('\n') || '(no logs yet)';
