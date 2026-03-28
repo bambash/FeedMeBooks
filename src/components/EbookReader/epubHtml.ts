@@ -10,12 +10,15 @@
  *     { type: 'prev' }
  *     { type: 'goToCfi', cfi: string }
  *     { type: 'goToPercentage', percentage: number }  // 0-1, requires locations to be generated
+ *     { type: 'goToChapter', chapterIndex: number }   // jump to spine item by index
+ *     { type: 'extractText' }                         // extract all chapter texts for sync indexing
  *     { type: 'setTheme', theme: ThemeData }
  *     { type: 'setFontSize', size: number }
  *
  *   WebView → RN (postMessage via ReactNativeWebView):
  *     { type: 'ready' }
  *     { type: 'locationChanged', cfi: string, percentage: number }
+ *     { type: 'textExtracted', chapters: Array<{chapterIndex: number, text: string}> }
  *     { type: 'error', message: string }
  */
 
@@ -321,8 +324,72 @@ export function buildEpubHtml(theme: EpubTheme): string {
               rendition.themes.fontSize(data.size + 'px');
             }
             break;
+          case 'goToChapter':
+            if (rendition) {
+              var ci = parseInt(data.chapterIndex, 10);
+              log('goToChapter(' + ci + ')');
+              rendition.display(ci).then(function() {
+                log('display(chapter=' + ci + ') resolved');
+              }).catch(function(e) {
+                log('display(chapter) error: ' + e);
+              });
+            }
+            break;
+          case 'extractText':
+            extractAllChapterText();
+            break;
         }
       } catch(e) {}
+    }
+
+    /**
+     * Walk every spine item, collect plain text, and send back a
+     * { type: 'textExtracted', chapters: [{chapterIndex, text}] } message.
+     * Used by the sync-index builder to align transcript against ebook chapters.
+     */
+    function extractAllChapterText() {
+      if (!book) {
+        send({ type: 'textExtracted', chapters: [] });
+        return;
+      }
+      var items = book.spine.items;
+      var chapters = [];
+      var i = 0;
+
+      function loadNext() {
+        if (i >= items.length) {
+          log('extractText done, ' + chapters.length + ' chapters');
+          send({ type: 'textExtracted', chapters: chapters });
+          return;
+        }
+        var item = items[i];
+        var idx = i;
+        i++;
+
+        item.load(book.load.bind(book)).then(function(doc) {
+          var text = '';
+          try {
+            var nodes = doc.querySelectorAll('p, li, h1, h2, h3, h4, h5, h6');
+            var parts = [];
+            nodes.forEach(function(el) {
+              var t = (el.textContent || '').replace(/\\s+/g, ' ').trim();
+              if (t.length >= 20) parts.push(t);
+            });
+            text = parts.join(' ');
+            if (!text && doc.body) {
+              text = (doc.body.textContent || '').replace(/\\s+/g, ' ').trim();
+            }
+          } catch(e) {}
+          chapters.push({ chapterIndex: idx, text: text });
+          item.unload();
+          loadNext();
+        }).catch(function() {
+          chapters.push({ chapterIndex: idx, text: '' });
+          loadNext();
+        });
+      }
+
+      loadNext();
     }
 
     // Android uses document, iOS uses window

@@ -14,7 +14,10 @@ import AudioPlayer from '../../src/components/AudioPlayer';
 import EbookReader from '../../src/components/EbookReader';
 import { useLibraryStore } from '../../src/store/libraryStore';
 import { colors, radius, spacing, typography } from '../../src/theme';
-import type { EbookPosition, ReaderMode } from '../../src/types';
+import type { EbookPosition, ReaderMode, SyncMap } from '../../src/types';
+import { buildSyncPoints, fillFilePositions, lookupByAudio, type ChapterText } from '../../src/utils/alignSync';
+import { downloadModel, isModelDownloaded, releaseWhisperContext, transcribeFile } from '../../src/utils/transcribeAudio';
+import { deleteSyncMap, loadSyncMap, saveSyncMap } from '../../src/utils/syncMapStorage';
 
 interface SyncBanner {
   targetMode: ReaderMode;
@@ -23,6 +26,18 @@ interface SyncBanner {
   /** Pre-computed audio seek target (only set when targetMode === 'audio') */
   targetFileIndex?: number;
   targetSeconds?: number;
+  /** When set, jump to this spine chapter index instead of using percentage */
+  targetChapterIndex?: number;
+}
+
+type IndexPhase = 'idle' | 'extracting' | 'downloading' | 'transcribing' | 'aligning' | 'done' | 'error';
+interface IndexStatus {
+  phase: IndexPhase;
+  /** 0–1 */
+  progress: number;
+  /** Which audio file is currently being transcribed (0-based) */
+  transcribeFileIndex?: number;
+  error?: string;
 }
 
 export default function ReaderScreen() {
@@ -30,7 +45,7 @@ export default function ReaderScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
 
-  const { getBook, updateEbookPosition, updateAudioPosition, updateAudioFileDuration, setLastMode } =
+  const { getBook, updateEbookPosition, updateAudioPosition, updateAudioFileDuration, setLastMode, setSyncMapCreatedAt } =
     useLibraryStore();
   const book = getBook(id);
 
@@ -41,10 +56,20 @@ export default function ReaderScreen() {
   const [syncBanner, setSyncBanner] = useState<SyncBanner | null>(null);
   /** When non-null, EpubReader will navigate to this percentage (0-1) */
   const [epubTargetPercentage, setEpubTargetPercentage] = useState<number | null>(null);
+  /** When non-null, EpubReader will navigate to this spine chapter index */
+  const [epubTargetChapter, setEpubTargetChapter] = useState<number | null>(null);
   /** Bump to remount AudioPlayer and apply a new seeked position from the store */
   const [audioPlayerKey, setAudioPlayerKey] = useState(0);
   const [devMode, setDevMode] = useState(false);
   const logsRef = useRef<string[]>([]);
+
+  // Sync map (word-level audio↔ebook alignment)
+  const [syncMap, setSyncMap] = useState<SyncMap | null>(null);
+  const [indexStatus, setIndexStatus] = useState<IndexStatus | null>(null);
+  /** Increment to trigger epub text extraction from the WebView */
+  const [textExtractRequest, setTextExtractRequest] = useState(0);
+  /** Accumulated chapter texts from epub — filled when textExtracted fires */
+  const chaptersRef = useRef<ChapterText[]>([]);
 
   const fadeAnim = useRef(new Animated.Value(1)).current;
 
@@ -92,6 +117,100 @@ export default function ReaderScreen() {
     return () => { cancelled = true; };
   }, [book?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Load persisted sync map when the book changes
+  useEffect(() => {
+    if (!book?.id) return;
+    loadSyncMap(book.id).then((map) => {
+      if (map) setSyncMap(map);
+    });
+  }, [book?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  /** Called when epub.js finishes extracting chapter texts — continues the indexing pipeline */
+  const handleTextExtracted = useCallback(
+    async (chapters: ChapterText[]) => {
+      chaptersRef.current = chapters;
+      const b = bookRef.current;
+      if (!b?.audioUris?.length || !chapters.length) {
+        setIndexStatus({ phase: 'error', progress: 0, error: 'No audio or ebook content found' });
+        return;
+      }
+
+      try {
+        // Download model if needed
+        if (!(await isModelDownloaded())) {
+          setIndexStatus({ phase: 'downloading', progress: 0 });
+          await downloadModel((p) =>
+            setIndexStatus({ phase: 'downloading', progress: p }),
+          );
+        }
+
+        // Transcribe each audio file, offsetting timestamps to be relative to audiobook start
+        const audioUris = b.audioUris!;
+        const fileDurationsMs = (b.session.audioFileDurations ?? []).map((d) => (d ?? 0) * 1000);
+        let cumulativeMs = 0;
+        const allSegments: Awaited<ReturnType<typeof transcribeFile>> = [];
+
+        for (let i = 0; i < audioUris.length; i++) {
+          setIndexStatus({ phase: 'transcribing', progress: i / audioUris.length, transcribeFileIndex: i });
+          const segs = await transcribeFile(audioUris[i], (p) =>
+            setIndexStatus({
+              phase: 'transcribing',
+              progress: (i + p) / audioUris.length,
+              transcribeFileIndex: i,
+            }),
+          );
+          // Offset segment timestamps so they're relative to the whole audiobook
+          for (const s of segs) {
+            allSegments.push({ ...s, t0Ms: s.t0Ms + cumulativeMs, t1Ms: s.t1Ms + cumulativeMs });
+          }
+          cumulativeMs += fileDurationsMs[i] ?? 0;
+        }
+
+        releaseWhisperContext();
+
+        // Align transcript to epub chapters
+        setIndexStatus({ phase: 'aligning', progress: 0 });
+        let points = buildSyncPoints(allSegments, chaptersRef.current, cumulativeMs);
+        points = fillFilePositions(points, fileDurationsMs);
+
+        const map: SyncMap = {
+          bookId: b.id,
+          createdAt: Date.now(),
+          totalAudioMs: cumulativeMs,
+          points,
+        };
+        await saveSyncMap(map);
+        setSyncMapCreatedAt(b.id, map.createdAt);
+        setSyncMap(map);
+        setIndexStatus({ phase: 'done', progress: 1 });
+      } catch (err) {
+        releaseWhisperContext();
+        setIndexStatus({
+          phase: 'error',
+          progress: 0,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    },
+    [setSyncMapCreatedAt],
+  );
+
+  /** Start the sync index build: request epub text extraction first */
+  const startBuildIndex = useCallback(() => {
+    if (mode !== 'ebook') return; // EpubReader must be mounted
+    setIndexStatus({ phase: 'extracting', progress: 0 });
+    setTextExtractRequest((n) => n + 1);
+  }, [mode]);
+
+  const handleRebuildIndex = useCallback(async () => {
+    const b = bookRef.current;
+    if (!b) return;
+    await deleteSyncMap(b.id);
+    setSyncMapCreatedAt(b.id, undefined);
+    setSyncMap(null);
+    setIndexStatus(null);
+  }, [setSyncMapCreatedAt]);
+
   const switchMode = useCallback(
     (next: ReaderMode) => {
       if (next === mode) return;
@@ -103,12 +222,20 @@ export default function ReaderScreen() {
         const totalDuration = durations.reduce((s, d) => s + (d ?? 0), 0);
 
         if (mode === 'audio' && next === 'ebook' && totalDuration > 0) {
-          // Compute audio percentage → offer jump in ebook
           const elapsed =
             durations.slice(0, b.session.audioFileIndex).reduce((s, d) => s + (d ?? 0), 0) +
             b.session.audioPosition;
           const pct = Math.min(elapsed / totalDuration, 1);
-          if (pct > 0.01) {
+
+          // Prefer sync-map chapter lookup over raw percentage
+          const currentMap = syncMap;
+          if (currentMap?.points.length && pct > 0.01) {
+            const currentAudioMs = elapsed * 1000;
+            const pt = lookupByAudio(currentMap.points, currentAudioMs);
+            if (pt) {
+              setSyncBanner({ targetMode: 'ebook', percentage: pct, targetChapterIndex: pt.chapterIndex });
+            }
+          } else if (pct > 0.01) {
             setSyncBanner({ targetMode: 'ebook', percentage: pct });
           }
         } else if (mode === 'ebook' && next === 'audio' && totalDuration > 0) {
@@ -133,9 +260,12 @@ export default function ReaderScreen() {
         }
       }
 
-      // Clear epub jump target when leaving ebook — prevents stale value
+      // Clear epub jump targets when leaving ebook — prevents stale values
       // from re-triggering when EbookReader remounts on next visit
-      if (mode === 'ebook') setEpubTargetPercentage(null);
+      if (mode === 'ebook') {
+        setEpubTargetPercentage(null);
+        setEpubTargetChapter(null);
+      }
 
       Animated.sequence([
         Animated.timing(fadeAnim, { toValue: 0, duration: 150, useNativeDriver: true }),
@@ -150,7 +280,11 @@ export default function ReaderScreen() {
     const b = bookRef.current;
     if (!syncBanner || !b) return;
     if (syncBanner.targetMode === 'ebook') {
-      setEpubTargetPercentage(syncBanner.percentage);
+      if (syncBanner.targetChapterIndex != null) {
+        setEpubTargetChapter(syncBanner.targetChapterIndex);
+      } else {
+        setEpubTargetPercentage(syncBanner.percentage);
+      }
     } else {
       updateAudioPosition(b.id, syncBanner.targetFileIndex ?? 0, syncBanner.targetSeconds ?? 0);
       setAudioPlayerKey((k) => k + 1);
@@ -228,6 +362,11 @@ export default function ReaderScreen() {
           devMode={devMode}
           onToggleDev={() => setDevMode((v) => !v)}
           onCopyLogs={copyLogs}
+          canBuildIndex={canEbook && canAudio && mode === 'ebook'}
+          syncMapCreatedAt={book.session.syncMapCreatedAt}
+          indexStatus={indexStatus}
+          onBuildIndex={startBuildIndex}
+          onRebuildIndex={handleRebuildIndex}
         />
       )}
 
@@ -265,8 +404,13 @@ export default function ReaderScreen() {
       {syncBanner && (
         <View style={styles.syncBanner}>
           <Text style={styles.syncBannerText}>
-            Jump to {Math.round(syncBanner.percentage * 100)}% — where you left off{' '}
-            {syncBanner.targetMode === 'ebook' ? 'listening' : 'reading'}?
+            {syncBanner.targetChapterIndex != null
+              ? `Jump to chapter ${syncBanner.targetChapterIndex + 1} — where you left off ${
+                  syncBanner.targetMode === 'ebook' ? 'listening' : 'reading'
+                }?`
+              : `Jump to ${Math.round(syncBanner.percentage * 100)}% — where you left off ${
+                  syncBanner.targetMode === 'ebook' ? 'listening' : 'reading'
+                }?`}
           </Text>
           <View style={styles.syncBannerActions}>
             <Pressable style={styles.syncAccept} onPress={handleSyncAccept}>
@@ -291,6 +435,9 @@ export default function ReaderScreen() {
               darkMode={darkMode}
               fontSize={fontSize}
               targetPercentage={epubTargetPercentage}
+              targetChapter={epubTargetChapter}
+              textExtractRequest={textExtractRequest}
+              onTextExtracted={handleTextExtracted}
               onLog={devMode ? handleLog : undefined}
             />
             {/* Compact audio strip while reading — if audio exists */}
@@ -337,6 +484,11 @@ function SettingsPanel({
   devMode,
   onToggleDev,
   onCopyLogs,
+  canBuildIndex,
+  syncMapCreatedAt,
+  indexStatus,
+  onBuildIndex,
+  onRebuildIndex,
 }: {
   darkMode: boolean;
   fontSize: number;
@@ -345,6 +497,11 @@ function SettingsPanel({
   devMode: boolean;
   onToggleDev: () => void;
   onCopyLogs: () => void;
+  canBuildIndex: boolean;
+  syncMapCreatedAt?: number;
+  indexStatus: IndexStatus | null;
+  onBuildIndex: () => void;
+  onRebuildIndex: () => void;
 }) {
   const MIN = 14;
   const MAX = 28;
@@ -355,6 +512,24 @@ function SettingsPanel({
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
   }, [onCopyLogs]);
+
+  const isIndexing = indexStatus != null &&
+    indexStatus.phase !== 'done' &&
+    indexStatus.phase !== 'error' &&
+    indexStatus.phase !== 'idle';
+
+  const indexLabel = React.useMemo(() => {
+    if (!indexStatus) return null;
+    switch (indexStatus.phase) {
+      case 'extracting':    return 'Extracting text…';
+      case 'downloading':   return `Downloading model… ${Math.round(indexStatus.progress * 100)}%`;
+      case 'transcribing':  return `Transcribing file ${(indexStatus.transcribeFileIndex ?? 0) + 1}… ${Math.round(indexStatus.progress * 100)}%`;
+      case 'aligning':      return 'Aligning words…';
+      case 'done':          return null; // shown via syncMapCreatedAt
+      case 'error':         return `Error: ${indexStatus.error}`;
+      default:              return null;
+    }
+  }, [indexStatus]);
 
   return (
     <View style={settingsStyles.panel}>
@@ -386,6 +561,44 @@ function SettingsPanel({
           </Pressable>
         </View>
       </View>
+
+      {/* Word sync index */}
+      {canBuildIndex && (
+        <View style={settingsStyles.syncIndexSection}>
+          <View style={settingsStyles.row}>
+            <View style={{ flex: 1 }}>
+              <Text style={settingsStyles.label}>Word Sync Index</Text>
+              <Text style={settingsStyles.sublabel}>
+                {syncMapCreatedAt
+                  ? `Indexed ${new Date(syncMapCreatedAt).toLocaleDateString()}`
+                  : 'Not yet indexed — enables chapter-accurate sync'}
+              </Text>
+              {indexLabel ? (
+                <Text style={[settingsStyles.sublabel, settingsStyles.sublabelActive]}>
+                  {indexLabel}
+                </Text>
+              ) : null}
+            </View>
+            {syncMapCreatedAt ? (
+              <Pressable
+                style={[settingsStyles.sizeBtn, isIndexing && settingsStyles.btnDisabled]}
+                onPress={isIndexing ? undefined : onRebuildIndex}
+              >
+                <Text style={settingsStyles.sizeBtnText}>Rebuild</Text>
+              </Pressable>
+            ) : (
+              <Pressable
+                style={[settingsStyles.copyLogsBtn, isIndexing && settingsStyles.btnDisabled]}
+                onPress={isIndexing ? undefined : onBuildIndex}
+              >
+                <Text style={settingsStyles.copyLogsBtnText}>
+                  {isIndexing ? 'Indexing…' : 'Build Index'}
+                </Text>
+              </Pressable>
+            )}
+          </View>
+        </View>
+      )}
 
       <View style={settingsStyles.row}>
         <Text style={settingsStyles.label}>Dev Logging</Text>
@@ -481,6 +694,22 @@ const settingsStyles = StyleSheet.create({
     ...typography.small,
     color: colors.primaryLight,
     fontWeight: '700',
+  },
+  syncIndexSection: {
+    borderTopWidth: 1,
+    borderTopColor: colors.border,
+    paddingTop: spacing.sm,
+  },
+  sublabel: {
+    ...typography.tiny,
+    color: colors.textMuted,
+    marginTop: 2,
+  },
+  sublabelActive: {
+    color: colors.primaryLight,
+  },
+  btnDisabled: {
+    opacity: 0.5,
   },
 });
 
