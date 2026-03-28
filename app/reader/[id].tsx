@@ -353,7 +353,7 @@ export default function ReaderScreen() {
           ) : null}
         </View>
 
-        <Pressable onPress={() => setShowSettings((v) => !v)} style={styles.settingsBtn} hitSlop={12}>
+        <Pressable testID="settings-btn" onPress={() => setShowSettings((v) => !v)} style={styles.settingsBtn} hitSlop={12}>
           <Text style={styles.settingsIcon}>⚙</Text>
         </Pressable>
       </View>
@@ -420,7 +420,7 @@ export default function ReaderScreen() {
                 }?`}
           </Text>
           <View style={styles.syncBannerActions}>
-            <Pressable style={styles.syncAccept} onPress={handleSyncAccept}>
+            <Pressable testID="sync-banner-jump-btn" style={styles.syncAccept} onPress={handleSyncAccept}>
               <Text style={styles.syncAcceptText}>Jump</Text>
             </Pressable>
             <Pressable style={styles.syncDismiss} onPress={() => setSyncBanner(null)}>
@@ -606,6 +606,7 @@ function SettingsPanel({
               </Pressable>
             ) : (
               <Pressable
+                testID="settings-build-index-btn"
                 style={[settingsStyles.copyLogsBtn, isIndexing && settingsStyles.btnDisabled]}
                 onPress={isIndexing ? undefined : onBuildIndex}
               >

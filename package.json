@@ -7,7 +7,20 @@
     "android": "expo run:android",
     "ios": "expo run:ios",
     "web": "expo start --web",
-    "lint": "expo lint"
+    "lint": "expo lint",
+    "test": "jest",
+    "test:watch": "jest --watch",
+    "generate:fixtures": "node scripts/generate-fixtures.mjs"
+  },
+  "jest": {
+    "preset": "jest-expo",
+    "testMatch": [
+      "**/__tests__/**/*.test.ts",
+      "**/__tests__/**/*.test.tsx"
+    ],
+    "transformIgnorePatterns": [
+      "node_modules/(?!(jest-expo|expo-modules-core|expo-asset|expo-constants|expo-file-system|expo-font|expo-application|expo-av|expo-clipboard|expo-document-picker|expo-image|expo-image-picker|expo-linking|expo-router|expo-splash-screen|expo-status-bar|expo|@expo|react-native|@react-native|whisper\\.rn)/)"
+    ]
   },
   "dependencies": {
     "@react-native-async-storage/async-storage": "1.23.1",
@@ -36,7 +49,10 @@
   },
   "devDependencies": {
     "@babel/core": "^7.24.0",
+    "@types/jest": "^30.0.0",
     "@types/react": "~18.2.45",
+    "jest": "^30.3.0",
+    "jest-expo": "~51.0.0",
     "typescript": "^5.3.3"
   },
   "private": true
