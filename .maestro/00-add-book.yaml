@@ -1,0 +1,66 @@
+# Adds the lorem-ipsum.epub + 3 WAV tracks as a new book.
+#
+# Pre-requisites:
+#   1. APK installed:    adb install android/app/build/outputs/apk/debug/app-debug.apk
+#   2. Fixtures pushed:  bash scripts/push-fixtures.sh
+#
+# Run:
+#   maestro test .maestro/00-add-book.yaml
+appId: com.feedmebooks.app
+---
+- launchApp:
+    clearState: true
+
+# Wait for library screen
+- assertVisible: "FeedMeBooks"
+
+# Tap the add-book button (+ icon)
+- tapOn:
+    text: "+"
+
+# ── Pick ebook ──────────────────────────────────────────────────────────────
+- assertVisible: "Add Ebook"
+- tapOn:
+    text: "Add Ebook"
+
+# The system file picker opens — navigate to Downloads and select the EPUB
+- assertVisible: "lorem-ipsum.epub"
+- tapOn:
+    text: "lorem-ipsum.epub"
+
+# ── Fill title / author ──────────────────────────────────────────────────────
+- tapOn:
+    text: "Title"
+- clearText
+- inputText: "Lorem Ipsum Test Book"
+
+- tapOn:
+    text: "Author"
+- clearText
+- inputText: "Fixture Generator"
+
+# ── Pick audio files ─────────────────────────────────────────────────────────
+- tapOn:
+    text: "Add Audio"
+
+- assertVisible: "track-01.wav"
+- tapOn:
+    text: "track-01.wav"
+
+- tapOn:
+    text: "Add Audio"
+- assertVisible: "track-02.wav"
+- tapOn:
+    text: "track-02.wav"
+
+- tapOn:
+    text: "Add Audio"
+- assertVisible: "track-03.wav"
+- tapOn:
+    text: "track-03.wav"
+
+# ── Save ─────────────────────────────────────────────────────────────────────
+- tapOn:
+    text: "Save"
+
+- assertVisible: "Lorem Ipsum Test Book"

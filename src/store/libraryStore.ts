@@ -3,6 +3,7 @@ import { create } from 'zustand';
 import { createJSONStorage, persist } from 'zustand/middleware';
 import type { Book, BookSession, EbookPosition, ReaderMode } from '../types';
 
+
 const STORAGE_KEY = 'feedmebooks-library';
 
 interface LibraryState {
@@ -15,6 +16,7 @@ interface LibraryState {
   updateAudioPosition: (id: string, fileIndex: number, positionSeconds: number) => void;
   updateAudioFileDuration: (id: string, fileIndex: number, durationSeconds: number) => void;
   setLastMode: (id: string, mode: ReaderMode) => void;
+  setSyncMapCreatedAt: (id: string, createdAt: number | undefined) => void;
   getBook: (id: string) => Book | undefined;
 }
 
@@ -108,6 +110,16 @@ export const useLibraryStore = create<LibraryState>()(
                     lastOpenedAt: Date.now(),
                   },
                 }
+              : b,
+          ),
+        }));
+      },
+
+      setSyncMapCreatedAt: (id, createdAt) => {
+        set((state) => ({
+          books: state.books.map((b) =>
+            b.id === id
+              ? { ...b, session: { ...b.session, syncMapCreatedAt: createdAt } }
               : b,
           ),
         }));

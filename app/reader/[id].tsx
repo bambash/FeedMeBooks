@@ -4,6 +4,8 @@ import { useLocalSearchParams, useRouter } from 'expo-router';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   Animated,
+  FlatList,
+  Modal,
   Pressable,
   StyleSheet,
   Text,
@@ -14,7 +16,10 @@ import AudioPlayer from '../../src/components/AudioPlayer';
 import EbookReader from '../../src/components/EbookReader';
 import { useLibraryStore } from '../../src/store/libraryStore';
 import { colors, radius, spacing, typography } from '../../src/theme';
-import type { EbookPosition, ReaderMode } from '../../src/types';
+import type { EbookPosition, ReaderMode, SyncMap } from '../../src/types';
+import { buildSyncPoints, fillFilePositions, lookupByAudio, type ChapterText } from '../../src/utils/alignSync';
+import { downloadModel, isModelDownloaded, releaseWhisperContext, transcribeFile } from '../../src/utils/transcribeAudio';
+import { deleteSyncMap, loadSyncMap, saveSyncMap } from '../../src/utils/syncMapStorage';
 
 interface SyncBanner {
   targetMode: ReaderMode;
@@ -23,6 +28,18 @@ interface SyncBanner {
   /** Pre-computed audio seek target (only set when targetMode === 'audio') */
   targetFileIndex?: number;
   targetSeconds?: number;
+  /** When set, jump to this spine chapter index instead of using percentage */
+  targetChapterIndex?: number;
+}
+
+type IndexPhase = 'idle' | 'extracting' | 'downloading' | 'transcribing' | 'aligning' | 'done' | 'error';
+interface IndexStatus {
+  phase: IndexPhase;
+  /** 0–1 */
+  progress: number;
+  /** Which audio file is currently being transcribed (0-based) */
+  transcribeFileIndex?: number;
+  error?: string;
 }
 
 export default function ReaderScreen() {
@@ -30,7 +47,7 @@ export default function ReaderScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
 
-  const { getBook, updateEbookPosition, updateAudioPosition, updateAudioFileDuration, setLastMode } =
+  const { getBook, updateEbookPosition, updateAudioPosition, updateAudioFileDuration, setLastMode, setSyncMapCreatedAt } =
     useLibraryStore();
   const book = getBook(id);
 
@@ -41,10 +58,22 @@ export default function ReaderScreen() {
   const [syncBanner, setSyncBanner] = useState<SyncBanner | null>(null);
   /** When non-null, EpubReader will navigate to this percentage (0-1) */
   const [epubTargetPercentage, setEpubTargetPercentage] = useState<number | null>(null);
+  /** When non-null, EpubReader will navigate to this spine chapter index */
+  const [epubTargetChapter, setEpubTargetChapter] = useState<number | null>(null);
   /** Bump to remount AudioPlayer and apply a new seeked position from the store */
   const [audioPlayerKey, setAudioPlayerKey] = useState(0);
   const [devMode, setDevMode] = useState(false);
+  const [logs, setLogs] = useState<string[]>([]);
+  const [showLogViewer, setShowLogViewer] = useState(false);
   const logsRef = useRef<string[]>([]);
+
+  // Sync map (word-level audio↔ebook alignment)
+  const [syncMap, setSyncMap] = useState<SyncMap | null>(null);
+  const [indexStatus, setIndexStatus] = useState<IndexStatus | null>(null);
+  /** Increment to trigger epub text extraction from the WebView */
+  const [textExtractRequest, setTextExtractRequest] = useState(0);
+  /** Accumulated chapter texts from epub — filled when textExtracted fires */
+  const chaptersRef = useRef<ChapterText[]>([]);
 
   const fadeAnim = useRef(new Animated.Value(1)).current;
 
@@ -92,6 +121,100 @@ export default function ReaderScreen() {
     return () => { cancelled = true; };
   }, [book?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Load persisted sync map when the book changes
+  useEffect(() => {
+    if (!book?.id) return;
+    loadSyncMap(book.id).then((map) => {
+      if (map) setSyncMap(map);
+    });
+  }, [book?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  /** Called when epub.js finishes extracting chapter texts — continues the indexing pipeline */
+  const handleTextExtracted = useCallback(
+    async (chapters: ChapterText[]) => {
+      chaptersRef.current = chapters;
+      const b = bookRef.current;
+      if (!b?.audioUris?.length || !chapters.length) {
+        setIndexStatus({ phase: 'error', progress: 0, error: 'No audio or ebook content found' });
+        return;
+      }
+
+      try {
+        // Download model if needed
+        if (!(await isModelDownloaded())) {
+          setIndexStatus({ phase: 'downloading', progress: 0 });
+          await downloadModel((p) =>
+            setIndexStatus({ phase: 'downloading', progress: p }),
+          );
+        }
+
+        // Transcribe each audio file, offsetting timestamps to be relative to audiobook start
+        const audioUris = b.audioUris!;
+        const fileDurationsMs = (b.session.audioFileDurations ?? []).map((d) => (d ?? 0) * 1000);
+        let cumulativeMs = 0;
+        const allSegments: Awaited<ReturnType<typeof transcribeFile>> = [];
+
+        for (let i = 0; i < audioUris.length; i++) {
+          setIndexStatus({ phase: 'transcribing', progress: i / audioUris.length, transcribeFileIndex: i });
+          const segs = await transcribeFile(audioUris[i], (p) =>
+            setIndexStatus({
+              phase: 'transcribing',
+              progress: (i + p) / audioUris.length,
+              transcribeFileIndex: i,
+            }),
+          );
+          // Offset segment timestamps so they're relative to the whole audiobook
+          for (const s of segs) {
+            allSegments.push({ ...s, t0Ms: s.t0Ms + cumulativeMs, t1Ms: s.t1Ms + cumulativeMs });
+          }
+          cumulativeMs += fileDurationsMs[i] ?? 0;
+        }
+
+        releaseWhisperContext();
+
+        // Align transcript to epub chapters
+        setIndexStatus({ phase: 'aligning', progress: 0 });
+        let points = buildSyncPoints(allSegments, chaptersRef.current, cumulativeMs);
+        points = fillFilePositions(points, fileDurationsMs);
+
+        const map: SyncMap = {
+          bookId: b.id,
+          createdAt: Date.now(),
+          totalAudioMs: cumulativeMs,
+          points,
+        };
+        await saveSyncMap(map);
+        setSyncMapCreatedAt(b.id, map.createdAt);
+        setSyncMap(map);
+        setIndexStatus({ phase: 'done', progress: 1 });
+      } catch (err) {
+        releaseWhisperContext();
+        setIndexStatus({
+          phase: 'error',
+          progress: 0,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    },
+    [setSyncMapCreatedAt],
+  );
+
+  /** Start the sync index build: request epub text extraction first */
+  const startBuildIndex = useCallback(() => {
+    if (mode !== 'ebook') return; // EpubReader must be mounted
+    setIndexStatus({ phase: 'extracting', progress: 0 });
+    setTextExtractRequest((n) => n + 1);
+  }, [mode]);
+
+  const handleRebuildIndex = useCallback(async () => {
+    const b = bookRef.current;
+    if (!b) return;
+    await deleteSyncMap(b.id);
+    setSyncMapCreatedAt(b.id, undefined);
+    setSyncMap(null);
+    setIndexStatus(null);
+  }, [setSyncMapCreatedAt]);
+
   const switchMode = useCallback(
     (next: ReaderMode) => {
       if (next === mode) return;
@@ -103,12 +226,20 @@ export default function ReaderScreen() {
         const totalDuration = durations.reduce((s, d) => s + (d ?? 0), 0);
 
         if (mode === 'audio' && next === 'ebook' && totalDuration > 0) {
-          // Compute audio percentage → offer jump in ebook
           const elapsed =
             durations.slice(0, b.session.audioFileIndex).reduce((s, d) => s + (d ?? 0), 0) +
             b.session.audioPosition;
           const pct = Math.min(elapsed / totalDuration, 1);
-          if (pct > 0.01) {
+
+          // Prefer sync-map chapter lookup over raw percentage
+          const currentMap = syncMap;
+          if (currentMap?.points.length && pct > 0.01) {
+            const currentAudioMs = elapsed * 1000;
+            const pt = lookupByAudio(currentMap.points, currentAudioMs);
+            if (pt) {
+              setSyncBanner({ targetMode: 'ebook', percentage: pct, targetChapterIndex: pt.chapterIndex });
+            }
+          } else if (pct > 0.01) {
             setSyncBanner({ targetMode: 'ebook', percentage: pct });
           }
         } else if (mode === 'ebook' && next === 'audio' && totalDuration > 0) {
@@ -133,9 +264,12 @@ export default function ReaderScreen() {
         }
       }
 
-      // Clear epub jump target when leaving ebook — prevents stale value
+      // Clear epub jump targets when leaving ebook — prevents stale values
       // from re-triggering when EbookReader remounts on next visit
-      if (mode === 'ebook') setEpubTargetPercentage(null);
+      if (mode === 'ebook') {
+        setEpubTargetPercentage(null);
+        setEpubTargetChapter(null);
+      }
 
       Animated.sequence([
         Animated.timing(fadeAnim, { toValue: 0, duration: 150, useNativeDriver: true }),
@@ -150,7 +284,11 @@ export default function ReaderScreen() {
     const b = bookRef.current;
     if (!syncBanner || !b) return;
     if (syncBanner.targetMode === 'ebook') {
-      setEpubTargetPercentage(syncBanner.percentage);
+      if (syncBanner.targetChapterIndex != null) {
+        setEpubTargetChapter(syncBanner.targetChapterIndex);
+      } else {
+        setEpubTargetPercentage(syncBanner.percentage);
+      }
     } else {
       updateAudioPosition(b.id, syncBanner.targetFileIndex ?? 0, syncBanner.targetSeconds ?? 0);
       setAudioPlayerKey((k) => k + 1);
@@ -181,7 +319,9 @@ export default function ReaderScreen() {
 
   const handleLog = useCallback((message: string) => {
     const ts = new Date().toISOString().slice(11, 23);
-    logsRef.current = [...logsRef.current, `${ts} ${message}`];
+    const entry = `${ts} ${message}`;
+    logsRef.current = [...logsRef.current, entry];
+    setLogs((prev) => [...prev, entry]);
   }, []);
 
   const copyLogs = useCallback(async () => {
@@ -213,7 +353,7 @@ export default function ReaderScreen() {
           ) : null}
         </View>
 
-        <Pressable onPress={() => setShowSettings((v) => !v)} style={styles.settingsBtn} hitSlop={12}>
+        <Pressable testID="settings-btn" onPress={() => setShowSettings((v) => !v)} style={styles.settingsBtn} hitSlop={12}>
           <Text style={styles.settingsIcon}>⚙</Text>
         </Pressable>
       </View>
@@ -228,6 +368,12 @@ export default function ReaderScreen() {
           devMode={devMode}
           onToggleDev={() => setDevMode((v) => !v)}
           onCopyLogs={copyLogs}
+          onViewLogs={() => setShowLogViewer(true)}
+          canBuildIndex={canEbook && canAudio && mode === 'ebook'}
+          syncMapCreatedAt={book.session.syncMapCreatedAt}
+          indexStatus={indexStatus}
+          onBuildIndex={startBuildIndex}
+          onRebuildIndex={handleRebuildIndex}
         />
       )}
 
@@ -265,11 +411,16 @@ export default function ReaderScreen() {
       {syncBanner && (
         <View style={styles.syncBanner}>
           <Text style={styles.syncBannerText}>
-            Jump to {Math.round(syncBanner.percentage * 100)}% — where you left off{' '}
-            {syncBanner.targetMode === 'ebook' ? 'listening' : 'reading'}?
+            {syncBanner.targetChapterIndex != null
+              ? `Jump to chapter ${syncBanner.targetChapterIndex + 1} — where you left off ${
+                  syncBanner.targetMode === 'ebook' ? 'listening' : 'reading'
+                }?`
+              : `Jump to ${Math.round(syncBanner.percentage * 100)}% — where you left off ${
+                  syncBanner.targetMode === 'ebook' ? 'listening' : 'reading'
+                }?`}
           </Text>
           <View style={styles.syncBannerActions}>
-            <Pressable style={styles.syncAccept} onPress={handleSyncAccept}>
+            <Pressable testID="sync-banner-jump-btn" style={styles.syncAccept} onPress={handleSyncAccept}>
               <Text style={styles.syncAcceptText}>Jump</Text>
             </Pressable>
             <Pressable style={styles.syncDismiss} onPress={() => setSyncBanner(null)}>
@@ -291,6 +442,9 @@ export default function ReaderScreen() {
               darkMode={darkMode}
               fontSize={fontSize}
               targetPercentage={epubTargetPercentage}
+              targetChapter={epubTargetChapter}
+              textExtractRequest={textExtractRequest}
+              onTextExtracted={handleTextExtracted}
               onLog={devMode ? handleLog : undefined}
             />
             {/* Compact audio strip while reading — if audio exists */}
@@ -320,6 +474,15 @@ export default function ReaderScreen() {
         ) : null}
       </Animated.View>
 
+      {/* Real-time log viewer */}
+      {showLogViewer && (
+        <LogViewer
+          logs={logs}
+          onClose={() => setShowLogViewer(false)}
+          onCopy={copyLogs}
+        />
+      )}
+
       {/* Bottom safe area */}
       <View style={{ height: insets.bottom }} />
     </View>
@@ -337,6 +500,12 @@ function SettingsPanel({
   devMode,
   onToggleDev,
   onCopyLogs,
+  onViewLogs,
+  canBuildIndex,
+  syncMapCreatedAt,
+  indexStatus,
+  onBuildIndex,
+  onRebuildIndex,
 }: {
   darkMode: boolean;
   fontSize: number;
@@ -345,6 +514,12 @@ function SettingsPanel({
   devMode: boolean;
   onToggleDev: () => void;
   onCopyLogs: () => void;
+  onViewLogs: () => void;
+  canBuildIndex: boolean;
+  syncMapCreatedAt?: number;
+  indexStatus: IndexStatus | null;
+  onBuildIndex: () => void;
+  onRebuildIndex: () => void;
 }) {
   const MIN = 14;
   const MAX = 28;
@@ -355,6 +530,24 @@ function SettingsPanel({
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
   }, [onCopyLogs]);
+
+  const isIndexing = indexStatus != null &&
+    indexStatus.phase !== 'done' &&
+    indexStatus.phase !== 'error' &&
+    indexStatus.phase !== 'idle';
+
+  const indexLabel = React.useMemo(() => {
+    if (!indexStatus) return null;
+    switch (indexStatus.phase) {
+      case 'extracting':    return 'Extracting text…';
+      case 'downloading':   return `Downloading model… ${Math.round(indexStatus.progress * 100)}%`;
+      case 'transcribing':  return `Transcribing file ${(indexStatus.transcribeFileIndex ?? 0) + 1}… ${Math.round(indexStatus.progress * 100)}%`;
+      case 'aligning':      return 'Aligning words…';
+      case 'done':          return null; // shown via syncMapCreatedAt
+      case 'error':         return `Error: ${indexStatus.error}`;
+      default:              return null;
+    }
+  }, [indexStatus]);
 
   return (
     <View style={settingsStyles.panel}>
@@ -387,6 +580,45 @@ function SettingsPanel({
         </View>
       </View>
 
+      {/* Word sync index */}
+      {canBuildIndex && (
+        <View style={settingsStyles.syncIndexSection}>
+          <View style={settingsStyles.row}>
+            <View style={{ flex: 1 }}>
+              <Text style={settingsStyles.label}>Word Sync Index</Text>
+              <Text style={settingsStyles.sublabel}>
+                {syncMapCreatedAt
+                  ? `Indexed ${new Date(syncMapCreatedAt).toLocaleDateString()}`
+                  : 'Not yet indexed — enables chapter-accurate sync'}
+              </Text>
+              {indexLabel ? (
+                <Text style={[settingsStyles.sublabel, settingsStyles.sublabelActive]}>
+                  {indexLabel}
+                </Text>
+              ) : null}
+            </View>
+            {syncMapCreatedAt ? (
+              <Pressable
+                style={[settingsStyles.sizeBtn, isIndexing && settingsStyles.btnDisabled]}
+                onPress={isIndexing ? undefined : onRebuildIndex}
+              >
+                <Text style={settingsStyles.sizeBtnText}>Rebuild</Text>
+              </Pressable>
+            ) : (
+              <Pressable
+                testID="settings-build-index-btn"
+                style={[settingsStyles.copyLogsBtn, isIndexing && settingsStyles.btnDisabled]}
+                onPress={isIndexing ? undefined : onBuildIndex}
+              >
+                <Text style={settingsStyles.copyLogsBtnText}>
+                  {isIndexing ? 'Indexing…' : 'Build Index'}
+                </Text>
+              </Pressable>
+            )}
+          </View>
+        </View>
+      )}
+
       <View style={settingsStyles.row}>
         <Text style={settingsStyles.label}>Dev Logging</Text>
         <Pressable
@@ -398,11 +630,14 @@ function SettingsPanel({
       </View>
 
       {devMode && (
-        <Pressable style={settingsStyles.copyLogsBtn} onPress={handleCopy}>
-          <Text style={settingsStyles.copyLogsBtnText}>
-            {copied ? 'Copied!' : 'Copy Logs'}
-          </Text>
-        </Pressable>
+        <View style={settingsStyles.devActions}>
+          <Pressable style={settingsStyles.devBtn} onPress={onViewLogs}>
+            <Text style={settingsStyles.devBtnText}>View Logs</Text>
+          </Pressable>
+          <Pressable style={settingsStyles.devBtn} onPress={handleCopy}>
+            <Text style={settingsStyles.devBtnText}>{copied ? 'Copied!' : 'Copy Logs'}</Text>
+          </Pressable>
+        </View>
       )}
     </View>
   );
@@ -478,6 +713,38 @@ const settingsStyles = StyleSheet.create({
     marginTop: spacing.xs,
   },
   copyLogsBtnText: {
+    ...typography.small,
+    color: colors.primaryLight,
+    fontWeight: '700',
+  },
+  syncIndexSection: {
+    borderTopWidth: 1,
+    borderTopColor: colors.border,
+    paddingTop: spacing.sm,
+  },
+  sublabel: {
+    ...typography.tiny,
+    color: colors.textMuted,
+    marginTop: 2,
+  },
+  sublabelActive: {
+    color: colors.primaryLight,
+  },
+  btnDisabled: {
+    opacity: 0.5,
+  },
+  devActions: {
+    flexDirection: 'row',
+    gap: spacing.sm,
+    justifyContent: 'flex-end',
+  },
+  devBtn: {
+    backgroundColor: colors.surfaceHigh,
+    borderRadius: radius.sm,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.xs,
+  },
+  devBtnText: {
     ...typography.small,
     color: colors.primaryLight,
     fontWeight: '700',
@@ -605,5 +872,127 @@ const styles = StyleSheet.create({
   syncDismissText: {
     ...typography.small,
     color: colors.textMuted,
+  },
+});
+
+// ────────────────────────────────────────────────────────────
+// Real-time log viewer (tail -f style)
+// ────────────────────────────────────────────────────────────
+function LogViewer({
+  logs,
+  onClose,
+  onCopy,
+}: {
+  logs: string[];
+  onClose: () => void;
+  onCopy: () => Promise<void>;
+}) {
+  const flatListRef = useRef<FlatList>(null);
+  const [copied, setCopied] = React.useState(false);
+  const insets = useSafeAreaInsets();
+
+  const handleCopy = React.useCallback(async () => {
+    await onCopy();
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  }, [onCopy]);
+
+  return (
+    <Modal visible animationType="slide" onRequestClose={onClose}>
+      <View style={[logStyles.container, { paddingTop: insets.top }]}>
+        {/* Header */}
+        <View style={logStyles.header}>
+          <Text style={logStyles.title}>Logs</Text>
+          <View style={logStyles.headerActions}>
+            <Pressable style={logStyles.headerBtn} onPress={handleCopy}>
+              <Text style={logStyles.headerBtnText}>{copied ? 'Copied!' : 'Copy'}</Text>
+            </Pressable>
+            <Pressable style={logStyles.headerBtn} onPress={onClose}>
+              <Text style={logStyles.headerBtnText}>Close</Text>
+            </Pressable>
+          </View>
+        </View>
+
+        {/* Log entries — auto-scrolls to bottom on new entries */}
+        {logs.length === 0 ? (
+          <View style={logStyles.empty}>
+            <Text style={logStyles.emptyText}>No logs yet. Enable Dev Logging to capture output.</Text>
+          </View>
+        ) : (
+          <FlatList
+            ref={flatListRef}
+            data={logs}
+            keyExtractor={(_, i) => String(i)}
+            renderItem={({ item }) => <Text style={logStyles.entry}>{item}</Text>}
+            onContentSizeChange={() => flatListRef.current?.scrollToEnd({ animated: false })}
+            onLayout={() => flatListRef.current?.scrollToEnd({ animated: false })}
+            contentContainerStyle={logStyles.listContent}
+            style={logStyles.list}
+          />
+        )}
+
+        <View style={{ height: insets.bottom }} />
+      </View>
+    </Modal>
+  );
+}
+
+const logStyles = StyleSheet.create({
+  container: {
+    flex: 1,
+    backgroundColor: '#0A0A0F',
+  },
+  header: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.border,
+  },
+  title: {
+    ...typography.body,
+    color: colors.text,
+    fontWeight: '700',
+  },
+  headerActions: {
+    flexDirection: 'row',
+    gap: spacing.sm,
+  },
+  headerBtn: {
+    backgroundColor: colors.surfaceHigh,
+    borderRadius: radius.sm,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.xs,
+  },
+  headerBtnText: {
+    ...typography.small,
+    color: colors.primaryLight,
+    fontWeight: '700',
+  },
+  list: {
+    flex: 1,
+  },
+  listContent: {
+    padding: spacing.sm,
+    gap: 2,
+  },
+  entry: {
+    fontFamily: 'monospace',
+    fontSize: 11,
+    color: '#A0E0A0',
+    lineHeight: 16,
+  },
+  empty: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: spacing.xl,
+  },
+  emptyText: {
+    ...typography.small,
+    color: colors.textMuted,
+    textAlign: 'center',
   },
 });
