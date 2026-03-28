@@ -141,6 +141,11 @@ export function buildEpubHtml(theme: EpubTheme): string {
       }
       // Fallback: navigate by spine index (more reliable than href for base64-loaded epubs)
       var items = book.spine ? book.spine.items : [];
+      if (!items.length) {
+        pendingPercentage = pct;
+        log('spine not ready yet, queued as pendingPercentage');
+        return;
+      }
       var idx = Math.min(Math.floor(pct * items.length), items.length - 1);
       var item = items[idx];
       log('spine fallback: spineCount=' + items.length + ' idx=' + idx + ' href=' + (item ? item.href : 'none'));
