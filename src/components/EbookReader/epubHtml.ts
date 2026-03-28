@@ -339,7 +339,7 @@ export function buildEpubHtml(theme: EpubTheme): string {
             extractAllChapterText();
             break;
         }
-      } catch(e) {}
+      } catch(e) { log('handleMessage error: ' + e); }
     }
 
     /**
@@ -348,42 +348,69 @@ export function buildEpubHtml(theme: EpubTheme): string {
      * Used by the sync-index builder to align transcript against ebook chapters.
      */
     function extractAllChapterText() {
-      if (!book) {
+      log('extractAllChapterText: book=' + (book ? 'yes' : 'null'));
+      if (!book || !book.spine) {
+        log('extractAllChapterText: no book/spine, aborting');
         send({ type: 'textExtracted', chapters: [] });
         return;
       }
       var items = book.spine.items;
+      log('extractAllChapterText: spineItems=' + items.length);
       var chapters = [];
       var i = 0;
 
       function loadNext() {
         if (i >= items.length) {
-          log('extractText done, ' + chapters.length + ' chapters');
+          log('extractText done, ' + chapters.length + ' chapters extracted');
           send({ type: 'textExtracted', chapters: chapters });
           return;
         }
         var item = items[i];
         var idx = i;
         i++;
+        log('extractText loading item ' + idx + '/' + items.length);
 
-        item.load(book.load.bind(book)).then(function(doc) {
+        var loadPromise;
+        try {
+          loadPromise = item.load(book.load.bind(book));
+        } catch(loadErr) {
+          log('extractText item.load() threw: ' + loadErr);
+          chapters.push({ chapterIndex: idx, text: '' });
+          loadNext();
+          return;
+        }
+
+        if (!loadPromise || typeof loadPromise.then !== 'function') {
+          log('extractText item.load() returned non-promise for idx=' + idx);
+          chapters.push({ chapterIndex: idx, text: '' });
+          loadNext();
+          return;
+        }
+
+        loadPromise.then(function(doc) {
           var text = '';
           try {
-            var nodes = doc.querySelectorAll('p, li, h1, h2, h3, h4, h5, h6');
-            var parts = [];
-            nodes.forEach(function(el) {
-              var t = (el.textContent || '').replace(/\\s+/g, ' ').trim();
-              if (t.length >= 20) parts.push(t);
-            });
-            text = parts.join(' ');
-            if (!text && doc.body) {
+            if (doc && doc.querySelectorAll) {
+              var nodes = doc.querySelectorAll('p, li, h1, h2, h3, h4, h5, h6');
+              var parts = [];
+              nodes.forEach(function(el) {
+                var t = (el.textContent || '').replace(/\\s+/g, ' ').trim();
+                if (t.length >= 20) parts.push(t);
+              });
+              text = parts.join(' ');
+            }
+            if (!text && doc && doc.body) {
               text = (doc.body.textContent || '').replace(/\\s+/g, ' ').trim();
             }
-          } catch(e) {}
+          } catch(parseErr) {
+            log('extractText parse error idx=' + idx + ': ' + parseErr);
+          }
+          log('extractText item ' + idx + ' text.length=' + text.length);
           chapters.push({ chapterIndex: idx, text: text });
-          item.unload();
+          try { item.unload(); } catch(e) {}
           loadNext();
-        }).catch(function() {
+        }).catch(function(err) {
+          log('extractText item ' + idx + ' load failed: ' + err);
           chapters.push({ chapterIndex: idx, text: '' });
           loadNext();
         });
