@@ -298,6 +298,8 @@ export function buildEpubHtml(theme: EpubTheme): string {
 
     // Message handler from React Native
     function handleMessage(event) {
+      // epub.js / JSZip post internal messages (e.g. setImmediate shims) — ignore non-JSON
+      if (!event.data || typeof event.data !== 'string' || event.data[0] !== '{') return;
       try {
         var data = JSON.parse(event.data);
         switch (data.type) {
@@ -354,20 +356,22 @@ export function buildEpubHtml(theme: EpubTheme): string {
         send({ type: 'textExtracted', chapters: [] });
         return;
       }
-      var items = book.spine.items;
-      log('extractAllChapterText: spineItems=' + items.length);
+      // book.spine.items are raw data objects; book.spine.get(i) returns the
+      // proper Section instance that has .load() / .unload() methods.
+      var itemCount = book.spine.items.length;
+      log('extractAllChapterText: spineItems=' + itemCount);
       var chapters = [];
       var i = 0;
 
       function loadNext() {
-        if (i >= items.length) {
+        if (i >= itemCount) {
           log('extractText done, ' + chapters.length + ' chapters extracted');
           send({ type: 'textExtracted', chapters: chapters });
           return;
         }
-        var item = items[i];
         var idx = i;
         i++;
+        var item = book.spine.get(idx);
         log('extractText loading item ' + idx + '/' + items.length);
 
         var loadPromise;
