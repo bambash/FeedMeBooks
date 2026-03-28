@@ -72,6 +72,8 @@ export default function ReaderScreen() {
   const [indexStatus, setIndexStatus] = useState<IndexStatus | null>(null);
   /** Increment to trigger epub text extraction from the WebView */
   const [textExtractRequest, setTextExtractRequest] = useState(0);
+  /** Set to true when component unmounts or book changes — cancels in-flight indexing */
+  const indexCancelledRef = useRef(false);
   /** Accumulated chapter texts from epub — filled when textExtracted fires */
   const chaptersRef = useRef<ChapterText[]>([]);
 
@@ -121,6 +123,12 @@ export default function ReaderScreen() {
     return () => { cancelled = true; };
   }, [book?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Cancel any in-flight indexing when the component unmounts or book changes
+  useEffect(() => {
+    indexCancelledRef.current = false;
+    return () => { indexCancelledRef.current = true; };
+  }, [book?.id]);
+
   // Load persisted sync map when the book changes
   useEffect(() => {
     if (!book?.id) return;
@@ -142,11 +150,15 @@ export default function ReaderScreen() {
       try {
         // Download model if needed
         if (!(await isModelDownloaded())) {
+          if (indexCancelledRef.current) return;
           setIndexStatus({ phase: 'downloading', progress: 0 });
-          await downloadModel((p) =>
-            setIndexStatus({ phase: 'downloading', progress: p }),
-          );
+          await downloadModel((p) => {
+            if (!indexCancelledRef.current)
+              setIndexStatus({ phase: 'downloading', progress: p });
+          });
         }
+
+        if (indexCancelledRef.current) { releaseWhisperContext(); return; }
 
         // Transcribe each audio file, offsetting timestamps to be relative to audiobook start
         const audioUris = b.audioUris!;
@@ -155,14 +167,16 @@ export default function ReaderScreen() {
         const allSegments: Awaited<ReturnType<typeof transcribeFile>> = [];
 
         for (let i = 0; i < audioUris.length; i++) {
+          if (indexCancelledRef.current) { releaseWhisperContext(); return; }
           setIndexStatus({ phase: 'transcribing', progress: i / audioUris.length, transcribeFileIndex: i });
-          const segs = await transcribeFile(audioUris[i], (p) =>
-            setIndexStatus({
-              phase: 'transcribing',
-              progress: (i + p) / audioUris.length,
-              transcribeFileIndex: i,
-            }),
-          );
+          const segs = await transcribeFile(audioUris[i], (p) => {
+            if (!indexCancelledRef.current)
+              setIndexStatus({
+                phase: 'transcribing',
+                progress: (i + p) / audioUris.length,
+                transcribeFileIndex: i,
+              });
+          });
           // Offset segment timestamps so they're relative to the whole audiobook
           for (const s of segs) {
             allSegments.push({ ...s, t0Ms: s.t0Ms + cumulativeMs, t1Ms: s.t1Ms + cumulativeMs });
@@ -171,11 +185,14 @@ export default function ReaderScreen() {
         }
 
         releaseWhisperContext();
+        if (indexCancelledRef.current) return;
 
         // Align transcript to epub chapters
         setIndexStatus({ phase: 'aligning', progress: 0 });
         let points = buildSyncPoints(allSegments, chaptersRef.current, cumulativeMs);
         points = fillFilePositions(points, fileDurationsMs);
+
+        if (indexCancelledRef.current) return;
 
         const map: SyncMap = {
           bookId: b.id,
@@ -189,11 +206,12 @@ export default function ReaderScreen() {
         setIndexStatus({ phase: 'done', progress: 1 });
       } catch (err) {
         releaseWhisperContext();
-        setIndexStatus({
-          phase: 'error',
-          progress: 0,
-          error: err instanceof Error ? err.message : String(err),
-        });
+        if (!indexCancelledRef.current)
+          setIndexStatus({
+            phase: 'error',
+            progress: 0,
+            error: err instanceof Error ? err.message : String(err),
+          });
       }
     },
     [setSyncMapCreatedAt],
