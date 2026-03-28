@@ -4,6 +4,8 @@ import { useLocalSearchParams, useRouter } from 'expo-router';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   Animated,
+  FlatList,
+  Modal,
   Pressable,
   StyleSheet,
   Text,
@@ -61,6 +63,8 @@ export default function ReaderScreen() {
   /** Bump to remount AudioPlayer and apply a new seeked position from the store */
   const [audioPlayerKey, setAudioPlayerKey] = useState(0);
   const [devMode, setDevMode] = useState(false);
+  const [logs, setLogs] = useState<string[]>([]);
+  const [showLogViewer, setShowLogViewer] = useState(false);
   const logsRef = useRef<string[]>([]);
 
   // Sync map (word-level audio↔ebook alignment)
@@ -315,7 +319,9 @@ export default function ReaderScreen() {
 
   const handleLog = useCallback((message: string) => {
     const ts = new Date().toISOString().slice(11, 23);
-    logsRef.current = [...logsRef.current, `${ts} ${message}`];
+    const entry = `${ts} ${message}`;
+    logsRef.current = [...logsRef.current, entry];
+    setLogs((prev) => [...prev, entry]);
   }, []);
 
   const copyLogs = useCallback(async () => {
@@ -362,6 +368,7 @@ export default function ReaderScreen() {
           devMode={devMode}
           onToggleDev={() => setDevMode((v) => !v)}
           onCopyLogs={copyLogs}
+          onViewLogs={() => setShowLogViewer(true)}
           canBuildIndex={canEbook && canAudio && mode === 'ebook'}
           syncMapCreatedAt={book.session.syncMapCreatedAt}
           indexStatus={indexStatus}
@@ -467,6 +474,15 @@ export default function ReaderScreen() {
         ) : null}
       </Animated.View>
 
+      {/* Real-time log viewer */}
+      {showLogViewer && (
+        <LogViewer
+          logs={logs}
+          onClose={() => setShowLogViewer(false)}
+          onCopy={copyLogs}
+        />
+      )}
+
       {/* Bottom safe area */}
       <View style={{ height: insets.bottom }} />
     </View>
@@ -484,6 +500,7 @@ function SettingsPanel({
   devMode,
   onToggleDev,
   onCopyLogs,
+  onViewLogs,
   canBuildIndex,
   syncMapCreatedAt,
   indexStatus,
@@ -497,6 +514,7 @@ function SettingsPanel({
   devMode: boolean;
   onToggleDev: () => void;
   onCopyLogs: () => void;
+  onViewLogs: () => void;
   canBuildIndex: boolean;
   syncMapCreatedAt?: number;
   indexStatus: IndexStatus | null;
@@ -611,11 +629,14 @@ function SettingsPanel({
       </View>
 
       {devMode && (
-        <Pressable style={settingsStyles.copyLogsBtn} onPress={handleCopy}>
-          <Text style={settingsStyles.copyLogsBtnText}>
-            {copied ? 'Copied!' : 'Copy Logs'}
-          </Text>
-        </Pressable>
+        <View style={settingsStyles.devActions}>
+          <Pressable style={settingsStyles.devBtn} onPress={onViewLogs}>
+            <Text style={settingsStyles.devBtnText}>View Logs</Text>
+          </Pressable>
+          <Pressable style={settingsStyles.devBtn} onPress={handleCopy}>
+            <Text style={settingsStyles.devBtnText}>{copied ? 'Copied!' : 'Copy Logs'}</Text>
+          </Pressable>
+        </View>
       )}
     </View>
   );
@@ -710,6 +731,22 @@ const settingsStyles = StyleSheet.create({
   },
   btnDisabled: {
     opacity: 0.5,
+  },
+  devActions: {
+    flexDirection: 'row',
+    gap: spacing.sm,
+    justifyContent: 'flex-end',
+  },
+  devBtn: {
+    backgroundColor: colors.surfaceHigh,
+    borderRadius: radius.sm,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.xs,
+  },
+  devBtnText: {
+    ...typography.small,
+    color: colors.primaryLight,
+    fontWeight: '700',
   },
 });
 
@@ -834,5 +871,127 @@ const styles = StyleSheet.create({
   syncDismissText: {
     ...typography.small,
     color: colors.textMuted,
+  },
+});
+
+// ────────────────────────────────────────────────────────────
+// Real-time log viewer (tail -f style)
+// ────────────────────────────────────────────────────────────
+function LogViewer({
+  logs,
+  onClose,
+  onCopy,
+}: {
+  logs: string[];
+  onClose: () => void;
+  onCopy: () => Promise<void>;
+}) {
+  const flatListRef = useRef<FlatList>(null);
+  const [copied, setCopied] = React.useState(false);
+  const insets = useSafeAreaInsets();
+
+  const handleCopy = React.useCallback(async () => {
+    await onCopy();
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  }, [onCopy]);
+
+  return (
+    <Modal visible animationType="slide" onRequestClose={onClose}>
+      <View style={[logStyles.container, { paddingTop: insets.top }]}>
+        {/* Header */}
+        <View style={logStyles.header}>
+          <Text style={logStyles.title}>Logs</Text>
+          <View style={logStyles.headerActions}>
+            <Pressable style={logStyles.headerBtn} onPress={handleCopy}>
+              <Text style={logStyles.headerBtnText}>{copied ? 'Copied!' : 'Copy'}</Text>
+            </Pressable>
+            <Pressable style={logStyles.headerBtn} onPress={onClose}>
+              <Text style={logStyles.headerBtnText}>Close</Text>
+            </Pressable>
+          </View>
+        </View>
+
+        {/* Log entries — auto-scrolls to bottom on new entries */}
+        {logs.length === 0 ? (
+          <View style={logStyles.empty}>
+            <Text style={logStyles.emptyText}>No logs yet. Enable Dev Logging to capture output.</Text>
+          </View>
+        ) : (
+          <FlatList
+            ref={flatListRef}
+            data={logs}
+            keyExtractor={(_, i) => String(i)}
+            renderItem={({ item }) => <Text style={logStyles.entry}>{item}</Text>}
+            onContentSizeChange={() => flatListRef.current?.scrollToEnd({ animated: false })}
+            onLayout={() => flatListRef.current?.scrollToEnd({ animated: false })}
+            contentContainerStyle={logStyles.listContent}
+            style={logStyles.list}
+          />
+        )}
+
+        <View style={{ height: insets.bottom }} />
+      </View>
+    </Modal>
+  );
+}
+
+const logStyles = StyleSheet.create({
+  container: {
+    flex: 1,
+    backgroundColor: '#0A0A0F',
+  },
+  header: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.border,
+  },
+  title: {
+    ...typography.body,
+    color: colors.text,
+    fontWeight: '700',
+  },
+  headerActions: {
+    flexDirection: 'row',
+    gap: spacing.sm,
+  },
+  headerBtn: {
+    backgroundColor: colors.surfaceHigh,
+    borderRadius: radius.sm,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.xs,
+  },
+  headerBtnText: {
+    ...typography.small,
+    color: colors.primaryLight,
+    fontWeight: '700',
+  },
+  list: {
+    flex: 1,
+  },
+  listContent: {
+    padding: spacing.sm,
+    gap: 2,
+  },
+  entry: {
+    fontFamily: 'monospace',
+    fontSize: 11,
+    color: '#A0E0A0',
+    lineHeight: 16,
+  },
+  empty: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: spacing.xl,
+  },
+  emptyText: {
+    ...typography.small,
+    color: colors.textMuted,
+    textAlign: 'center',
   },
 });
