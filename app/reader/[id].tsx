@@ -20,6 +20,7 @@ import type { EbookPosition, ReaderMode, SyncMap } from '../../src/types';
 import { buildSyncPoints, fillFilePositions, lookupByAudio, type ChapterText } from '../../src/utils/alignSync';
 import { downloadModel, isModelDownloaded, releaseWhisperContext, transcribeFile } from '../../src/utils/transcribeAudio';
 import { deleteSyncMap, loadSyncMap, saveSyncMap } from '../../src/utils/syncMapStorage';
+import { deleteTranscriptionCache, loadCachedFileSegments, loadCacheMeta, saveFileSegments } from '../../src/utils/transcriptionCache';
 
 interface SyncBanner {
   targetMode: ReaderMode;
@@ -180,21 +181,42 @@ export default function ReaderScreen() {
         let cumulativeMs = 0;
         const allSegments: Awaited<ReturnType<typeof transcribeFile>> = [];
 
-        handleLog(`[index] transcribing ${audioUris.length} audio file(s)`);
+        // Check for a previously interrupted transcription run
+        const cacheMeta = await loadCacheMeta(b.id, audioUris);
+        const completedSet = new Set(cacheMeta?.completedIndices ?? []);
+        const resuming = completedSet.size > 0;
+        handleLog(
+          resuming
+            ? `[index] resuming — ${completedSet.size}/${audioUris.length} files already cached`
+            : `[index] transcribing ${audioUris.length} audio file(s)`,
+        );
+
         for (let i = 0; i < audioUris.length; i++) {
           if (indexCancelledRef.current) { releaseWhisperContext(); return; }
           const fileName = audioUris[i].split('/').pop() ?? `file ${i + 1}`;
-          handleLog(`[index] transcribing file ${i + 1}/${audioUris.length}: ${fileName}`);
-          setIndexStatus({ phase: 'transcribing', progress: i / audioUris.length, transcribeFileIndex: i });
-          const segs = await transcribeFile(audioUris[i], (p) => {
-            if (!indexCancelledRef.current)
-              setIndexStatus({
-                phase: 'transcribing',
-                progress: (i + p) / audioUris.length,
-                transcribeFileIndex: i,
-              });
-          });
-          handleLog(`[index] file ${i + 1} done — ${segs.length} segments`);
+
+          // Re-use cached segments if this file was already transcribed
+          const cached = completedSet.has(i) ? await loadCachedFileSegments(b.id, i) : null;
+          let segs: Awaited<ReturnType<typeof transcribeFile>>;
+          if (cached) {
+            segs = cached;
+            handleLog(`[index] file ${i + 1}/${audioUris.length} (cached): ${fileName} — ${segs.length} segments`);
+          } else {
+            handleLog(`[index] transcribing file ${i + 1}/${audioUris.length}: ${fileName}`);
+            setIndexStatus({ phase: 'transcribing', progress: i / audioUris.length, transcribeFileIndex: i });
+            segs = await transcribeFile(audioUris[i], (p) => {
+              if (!indexCancelledRef.current)
+                setIndexStatus({
+                  phase: 'transcribing',
+                  progress: (i + p) / audioUris.length,
+                  transcribeFileIndex: i,
+                });
+            });
+            handleLog(`[index] file ${i + 1} done — ${segs.length} segments`);
+            // Persist so a future resume can skip this file
+            await saveFileSegments(b.id, i, segs, audioUris);
+          }
+
           // Offset segment timestamps so they're relative to the whole audiobook
           for (const s of segs) {
             allSegments.push({ ...s, t0Ms: s.t0Ms + cumulativeMs, t1Ms: s.t1Ms + cumulativeMs });
@@ -221,6 +243,7 @@ export default function ReaderScreen() {
           points,
         };
         await saveSyncMap(map);
+        await deleteTranscriptionCache(b.id);
         setSyncMapCreatedAt(b.id, map.createdAt);
         setSyncMap(map);
         setIndexStatus({ phase: 'done', progress: 1 });
@@ -250,7 +273,7 @@ export default function ReaderScreen() {
   const handleRebuildIndex = useCallback(async () => {
     const b = bookRef.current;
     if (!b) return;
-    await deleteSyncMap(b.id);
+    await Promise.all([deleteSyncMap(b.id), deleteTranscriptionCache(b.id)]);
     setSyncMapCreatedAt(b.id, undefined);
     setSyncMap(null);
     setIndexStatus(null);
