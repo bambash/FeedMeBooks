@@ -372,7 +372,7 @@ export function buildEpubHtml(theme: EpubTheme): string {
         var idx = i;
         i++;
         var item = book.spine.get(idx);
-        log('extractText loading item ' + idx + '/' + items.length);
+        log('extractText loading item ' + idx + '/' + itemCount);
 
         var loadPromise;
         try {
