@@ -1,9 +1,10 @@
+import { Audio } from 'expo-av';
+import * as Clipboard from 'expo-clipboard';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   Animated,
   Pressable,
-  SafeAreaView,
   StyleSheet,
   Text,
   View,
@@ -15,35 +16,127 @@ import { useLibraryStore } from '../../src/store/libraryStore';
 import { colors, radius, spacing, typography } from '../../src/theme';
 import type { EbookPosition, ReaderMode } from '../../src/types';
 
+interface SyncBanner {
+  targetMode: ReaderMode;
+  /** 0–1 fractional position to jump to in the target mode */
+  percentage: number;
+  /** Pre-computed audio seek target (only set when targetMode === 'audio') */
+  targetFileIndex?: number;
+  targetSeconds?: number;
+}
+
 export default function ReaderScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const router = useRouter();
   const insets = useSafeAreaInsets();
 
-  const { getBook, updateEbookPosition, updateAudioPosition, setLastMode } = useLibraryStore();
+  const { getBook, updateEbookPosition, updateAudioPosition, updateAudioFileDuration, setLastMode } =
+    useLibraryStore();
   const book = getBook(id);
 
   const [mode, setMode] = useState<ReaderMode>(book?.session.lastMode ?? 'ebook');
   const [showSettings, setShowSettings] = useState(false);
   const [darkMode, setDarkMode] = useState(true);
   const [fontSize, setFontSize] = useState(18);
+  const [syncBanner, setSyncBanner] = useState<SyncBanner | null>(null);
+  /** When non-null, EpubReader will navigate to this percentage (0-1) */
+  const [epubTargetPercentage, setEpubTargetPercentage] = useState<number | null>(null);
+  /** Bump to remount AudioPlayer and apply a new seeked position from the store */
+  const [audioPlayerKey, setAudioPlayerKey] = useState(0);
+  const [devMode, setDevMode] = useState(false);
+  const logsRef = useRef<string[]>([]);
 
-  // Animate mode switch
   const fadeAnim = useRef(new Animated.Value(1)).current;
 
+  // Keep a ref to the latest book so switchMode can read session without stale closure
+  const bookRef = useRef(book);
+  bookRef.current = book;
+
   useEffect(() => {
-    if (!book) {
-      router.back();
-    }
+    if (!book) router.back();
   }, [book, router]);
 
   useEffect(() => {
     if (book) setLastMode(book.id, mode);
-  }, [mode]);
+  }, [mode]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Pre-scan durations for all audio tracks so the full book length is known
+  // immediately, not just after each track is played.
+  useEffect(() => {
+    const uris = book?.audioUris;
+    const bookId = book?.id;
+    if (!uris?.length || !bookId) return;
+
+    let cancelled = false;
+    const cached = book.session.audioFileDurations ?? [];
+
+    (async () => {
+      for (let i = 0; i < uris.length; i++) {
+        if (cancelled) break;
+        if (cached[i] != null && cached[i] > 0) continue; // already known
+        try {
+          const { sound, status } = await Audio.Sound.createAsync(
+            { uri: uris[i] },
+            { shouldPlay: false },
+          );
+          if (!cancelled && status.isLoaded && status.durationMillis) {
+            updateAudioFileDuration(bookId, i, status.durationMillis / 1000);
+          }
+          await sound.unloadAsync();
+        } catch {
+          // skip unreadable file
+        }
+      }
+    })();
+
+    return () => { cancelled = true; };
+  }, [book?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const switchMode = useCallback(
     (next: ReaderMode) => {
       if (next === mode) return;
+
+      const b = bookRef.current;
+      if (b) {
+        const durations = b.session.audioFileDurations ?? [];
+        // Use ?? 0 so sparse/missing entries don't produce NaN
+        const totalDuration = durations.reduce((s, d) => s + (d ?? 0), 0);
+
+        if (mode === 'audio' && next === 'ebook' && totalDuration > 0) {
+          // Compute audio percentage → offer jump in ebook
+          const elapsed =
+            durations.slice(0, b.session.audioFileIndex).reduce((s, d) => s + (d ?? 0), 0) +
+            b.session.audioPosition;
+          const pct = Math.min(elapsed / totalDuration, 1);
+          if (pct > 0.01) {
+            setSyncBanner({ targetMode: 'ebook', percentage: pct });
+          }
+        } else if (mode === 'ebook' && next === 'audio' && totalDuration > 0) {
+          // Compute ebook percentage → offer jump in audiobook
+          const pct = b.session.ebookPosition.percentage;
+          if (pct > 0.01) {
+            const targetElapsed = pct * totalDuration;
+            let cumulative = 0;
+            let targetFileIndex = durations.length - 1;
+            let targetSeconds = durations[durations.length - 1] ?? 0;
+            for (let i = 0; i < durations.length; i++) {
+              const d = durations[i] ?? 0;
+              if (cumulative + d >= targetElapsed) {
+                targetFileIndex = i;
+                targetSeconds = targetElapsed - cumulative;
+                break;
+              }
+              cumulative += d;
+            }
+            setSyncBanner({ targetMode: 'audio', percentage: pct, targetFileIndex, targetSeconds });
+          }
+        }
+      }
+
+      // Clear epub jump target when leaving ebook — prevents stale value
+      // from re-triggering when EbookReader remounts on next visit
+      if (mode === 'ebook') setEpubTargetPercentage(null);
+
       Animated.sequence([
         Animated.timing(fadeAnim, { toValue: 0, duration: 150, useNativeDriver: true }),
         Animated.timing(fadeAnim, { toValue: 1, duration: 200, useNativeDriver: true }),
@@ -52,6 +145,18 @@ export default function ReaderScreen() {
     },
     [mode, fadeAnim],
   );
+
+  const handleSyncAccept = useCallback(() => {
+    const b = bookRef.current;
+    if (!syncBanner || !b) return;
+    if (syncBanner.targetMode === 'ebook') {
+      setEpubTargetPercentage(syncBanner.percentage);
+    } else {
+      updateAudioPosition(b.id, syncBanner.targetFileIndex ?? 0, syncBanner.targetSeconds ?? 0);
+      setAudioPlayerKey((k) => k + 1);
+    }
+    setSyncBanner(null);
+  }, [syncBanner, updateAudioPosition]);
 
   const handleEbookPositionChange = useCallback(
     (position: Partial<EbookPosition>) => {
@@ -67,11 +172,29 @@ export default function ReaderScreen() {
     [book, updateAudioPosition],
   );
 
+  const handleDurationLoaded = useCallback(
+    (fileIndex: number, seconds: number) => {
+      if (book) updateAudioFileDuration(book.id, fileIndex, seconds);
+    },
+    [book, updateAudioFileDuration],
+  );
+
+  const handleLog = useCallback((message: string) => {
+    const ts = new Date().toISOString().slice(11, 23);
+    logsRef.current = [...logsRef.current, `${ts} ${message}`];
+  }, []);
+
+  const copyLogs = useCallback(async () => {
+    const text = logsRef.current.join('\n') || '(no logs yet)';
+    await Clipboard.setStringAsync(text);
+  }, []);
+
   if (!book) return null;
 
   const canEbook = Boolean(book.ebookUri && book.ebookFormat);
   const canAudio = Boolean(book.audioUris?.length);
-  const activeMode = mode === 'ebook' && canEbook ? 'ebook'
+  const activeMode =
+    mode === 'ebook' && canEbook ? 'ebook'
     : mode === 'audio' && canAudio ? 'audio'
     : canEbook ? 'ebook' : 'audio';
 
@@ -102,6 +225,9 @@ export default function ReaderScreen() {
           fontSize={fontSize}
           onToggleDark={() => setDarkMode((v) => !v)}
           onFontSizeChange={setFontSize}
+          devMode={devMode}
+          onToggleDev={() => setDevMode((v) => !v)}
+          onCopyLogs={copyLogs}
         />
       )}
 
@@ -135,6 +261,24 @@ export default function ReaderScreen() {
         )}
       </View>
 
+      {/* Sync banner */}
+      {syncBanner && (
+        <View style={styles.syncBanner}>
+          <Text style={styles.syncBannerText}>
+            Jump to {Math.round(syncBanner.percentage * 100)}% — where you left off{' '}
+            {syncBanner.targetMode === 'ebook' ? 'listening' : 'reading'}?
+          </Text>
+          <View style={styles.syncBannerActions}>
+            <Pressable style={styles.syncAccept} onPress={handleSyncAccept}>
+              <Text style={styles.syncAcceptText}>Jump</Text>
+            </Pressable>
+            <Pressable style={styles.syncDismiss} onPress={() => setSyncBanner(null)}>
+              <Text style={styles.syncDismissText}>Skip</Text>
+            </Pressable>
+          </View>
+        </View>
+      )}
+
       {/* Content */}
       <Animated.View style={[styles.content, { opacity: fadeAnim }]}>
         {activeMode === 'ebook' && canEbook ? (
@@ -146,14 +290,18 @@ export default function ReaderScreen() {
               onPositionChange={handleEbookPositionChange}
               darkMode={darkMode}
               fontSize={fontSize}
+              targetPercentage={epubTargetPercentage}
+              onLog={devMode ? handleLog : undefined}
             />
             {/* Compact audio strip while reading — if audio exists */}
             {canAudio && (
               <AudioPlayer
+                key={audioPlayerKey}
                 uris={book.audioUris!}
                 fileIndex={book.session.audioFileIndex}
                 savedPosition={book.session.audioPosition}
                 onPositionChange={handleAudioPositionChange}
+                onDurationLoaded={handleDurationLoaded}
                 bookTitle={book.title}
                 compact
               />
@@ -161,10 +309,12 @@ export default function ReaderScreen() {
           </>
         ) : activeMode === 'audio' && canAudio ? (
           <AudioPlayer
+            key={audioPlayerKey}
             uris={book.audioUris!}
             fileIndex={book.session.audioFileIndex}
             savedPosition={book.session.audioPosition}
             onPositionChange={handleAudioPositionChange}
+            onDurationLoaded={handleDurationLoaded}
             bookTitle={book.title}
           />
         ) : null}
@@ -184,14 +334,27 @@ function SettingsPanel({
   fontSize,
   onToggleDark,
   onFontSizeChange,
+  devMode,
+  onToggleDev,
+  onCopyLogs,
 }: {
   darkMode: boolean;
   fontSize: number;
   onToggleDark: () => void;
   onFontSizeChange: (size: number) => void;
+  devMode: boolean;
+  onToggleDev: () => void;
+  onCopyLogs: () => void;
 }) {
   const MIN = 14;
   const MAX = 28;
+  const [copied, setCopied] = React.useState(false);
+
+  const handleCopy = React.useCallback(async () => {
+    await onCopyLogs();
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  }, [onCopyLogs]);
 
   return (
     <View style={settingsStyles.panel}>
@@ -223,6 +386,24 @@ function SettingsPanel({
           </Pressable>
         </View>
       </View>
+
+      <View style={settingsStyles.row}>
+        <Text style={settingsStyles.label}>Dev Logging</Text>
+        <Pressable
+          style={[settingsStyles.toggle, devMode && settingsStyles.toggleOn]}
+          onPress={onToggleDev}
+        >
+          <View style={[settingsStyles.thumb, devMode && settingsStyles.thumbOn]} />
+        </Pressable>
+      </View>
+
+      {devMode && (
+        <Pressable style={settingsStyles.copyLogsBtn} onPress={handleCopy}>
+          <Text style={settingsStyles.copyLogsBtnText}>
+            {copied ? 'Copied!' : 'Copy Logs'}
+          </Text>
+        </Pressable>
+      )}
     </View>
   );
 }
@@ -287,6 +468,19 @@ const settingsStyles = StyleSheet.create({
     minWidth: 24,
     textAlign: 'center',
     fontVariant: ['tabular-nums'],
+  },
+  copyLogsBtn: {
+    alignSelf: 'flex-end',
+    backgroundColor: colors.surfaceHigh,
+    borderRadius: radius.sm,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.xs,
+    marginTop: spacing.xs,
+  },
+  copyLogsBtnText: {
+    ...typography.small,
+    color: colors.primaryLight,
+    fontWeight: '700',
   },
 });
 
@@ -372,5 +566,44 @@ const styles = StyleSheet.create({
   },
   content: {
     flex: 1,
+  },
+  syncBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    backgroundColor: colors.primaryDim,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.border,
+    gap: spacing.sm,
+  },
+  syncBannerText: {
+    ...typography.small,
+    color: colors.primaryLight,
+    flex: 1,
+  },
+  syncBannerActions: {
+    flexDirection: 'row',
+    gap: spacing.sm,
+  },
+  syncAccept: {
+    backgroundColor: colors.primary,
+    borderRadius: radius.full,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.xs,
+  },
+  syncAcceptText: {
+    ...typography.small,
+    color: colors.white,
+    fontWeight: '700',
+  },
+  syncDismiss: {
+    paddingHorizontal: spacing.sm,
+    paddingVertical: spacing.xs,
+  },
+  syncDismissText: {
+    ...typography.small,
+    color: colors.textMuted,
   },
 });

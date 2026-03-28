@@ -12,6 +12,10 @@ interface Props {
   onPositionChange: (position: Partial<EbookPosition>) => void;
   darkMode?: boolean;
   fontSize?: number;
+  /** When set to a 0-1 percentage, EpubReader will navigate to that position */
+  targetPercentage?: number | null;
+  /** Dev-mode log sink — receives timestamped messages from both RN and WebView layers */
+  onLog?: (message: string) => void;
 }
 
 export default function EpubReader({
@@ -20,17 +24,38 @@ export default function EpubReader({
   onPositionChange,
   darkMode = true,
   fontSize = 18,
+  targetPercentage,
+  onLog,
 }: Props) {
   const webViewRef = useRef<WebView>(null);
   const [loading, setLoading] = useState(true);
   const [base64, setBase64] = useState<string | null>(null);
-  const loadedRef = useRef(false);
+
+  // Three-ref pattern to fix race condition between WebView load and base64 read
+  const webViewReadyRef = useRef(false);  // onLoad has fired
+  const bookSentRef = useRef(false);       // 'load' message sent to WebView
+  const base64Ref = useRef<string | null>(null);
+  // Track last sent targetPercentage to avoid re-sending the same value
+  const sentPercentageRef = useRef<number | null>(null);
+  // Always-current ref so onWebViewLoad can read the latest targetPercentage
+  const targetPercentageRef = useRef(targetPercentage ?? null);
+  targetPercentageRef.current = targetPercentage ?? null;
+  const onLogRef = useRef(onLog);
+  onLogRef.current = onLog;
+
+  const rnLog = useCallback((msg: string) => {
+    onLogRef.current?.(`[rn] ${msg}`);
+  }, []);
 
   const theme = {
     background: darkMode ? colors.bg : '#FAFAFA',
     color: darkMode ? colors.text : '#1A1A2E',
     fontSize,
   };
+
+  // Keep theme accessible in callbacks without causing re-sends
+  const themeRef = useRef(theme);
+  themeRef.current = theme;
 
   useEffect(() => {
     let cancelled = false;
@@ -53,22 +78,53 @@ export default function EpubReader({
     );
   }, []);
 
-  const onWebViewLoad = useCallback(() => {
-    if (!base64 || loadedRef.current) return;
-    loadedRef.current = true;
-    sendToWebView({
-      type: 'load',
-      base64,
-      cfi: savedPosition.cfi,
-      theme,
-    });
-  }, [base64, savedPosition.cfi, sendToWebView, theme]);
-
+  // When base64 arrives: save it and try to send load if WebView is already ready
   useEffect(() => {
-    if (base64 && loadedRef.current) {
+    if (!base64) return;
+    base64Ref.current = base64;
+    if (webViewReadyRef.current && !bookSentRef.current) {
+      bookSentRef.current = true;
+      sendToWebView({ type: 'load', base64, cfi: savedPosition.cfi, theme: themeRef.current });
+    }
+  }, [base64]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const onWebViewLoad = useCallback(() => {
+    webViewReadyRef.current = true;
+    rnLog('onWebViewLoad base64Ready=' + (base64Ref.current != null) + ' bookSent=' + bookSentRef.current);
+    if (base64Ref.current && !bookSentRef.current) {
+      bookSentRef.current = true;
+      rnLog('sending load cfi=' + (savedPosition.cfi ?? 'none'));
+      sendToWebView({ type: 'load', base64: base64Ref.current, cfi: savedPosition.cfi, theme: themeRef.current });
+    }
+    // Deliver any percentage jump that arrived before the WebView was ready
+    const pct = targetPercentageRef.current;
+    if (pct != null && pct !== sentPercentageRef.current) {
+      sentPercentageRef.current = pct;
+      rnLog('sending goToPercentage (from onWebViewLoad) pct=' + pct);
+      sendToWebView({ type: 'goToPercentage', percentage: pct });
+    }
+  }, [savedPosition.cfi, sendToWebView, rnLog]);
+
+  // Send theme updates after book is loaded
+  useEffect(() => {
+    if (bookSentRef.current) {
       sendToWebView({ type: 'setTheme', theme });
     }
-  }, [darkMode, fontSize]);
+  }, [darkMode, fontSize]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Navigate to a percentage position when targetPercentage changes
+  useEffect(() => {
+    rnLog('targetPercentage effect pct=' + targetPercentage + ' webViewReady=' + webViewReadyRef.current + ' alreadySent=' + (targetPercentage === sentPercentageRef.current));
+    if (
+      targetPercentage != null &&
+      webViewReadyRef.current &&
+      targetPercentage !== sentPercentageRef.current
+    ) {
+      sentPercentageRef.current = targetPercentage;
+      rnLog('sending goToPercentage (from effect) pct=' + targetPercentage);
+      sendToWebView({ type: 'goToPercentage', percentage: targetPercentage });
+    }
+  }, [targetPercentage, sendToWebView, rnLog]);
 
   const onMessage = useCallback(
     (event: WebViewMessageEvent) => {
@@ -78,6 +134,8 @@ export default function EpubReader({
           setLoading(false);
         } else if (data.type === 'locationChanged') {
           onPositionChange({ cfi: data.cfi, percentage: data.percentage });
+        } else if (data.type === 'log') {
+          onLogRef.current?.(data.message);
         }
       } catch {}
     },

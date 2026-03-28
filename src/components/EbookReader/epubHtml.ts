@@ -9,6 +9,7 @@
  *     { type: 'next' }
  *     { type: 'prev' }
  *     { type: 'goToCfi', cfi: string }
+ *     { type: 'goToPercentage', percentage: number }  // 0-1, requires locations to be generated
  *     { type: 'setTheme', theme: ThemeData }
  *     { type: 'setFontSize', size: number }
  *
@@ -105,6 +106,47 @@ export function buildEpubHtml(theme: EpubTheme): string {
     var book = null;
     var rendition = null;
     var pendingCfi = null;
+    var locationsReady = false;
+    var pendingPercentage = null;
+
+    /**
+     * Navigate to a fractional position (0–1).
+     * - If precise locations are ready: use cfiFromPercentage.
+     * - Otherwise: navigate to the spine item nearest to that fraction
+     *   (chapter-level, but works immediately without location generation).
+     * - If the book isn't loaded yet: store as pendingPercentage for later.
+     */
+    function goToPercentage(pct) {
+      log('goToPercentage(' + pct.toFixed(4) + ') book=' + (book ? 'yes' : 'null') + ' locationsReady=' + locationsReady);
+      if (!book || !rendition) {
+        pendingPercentage = pct;
+        log('queued as pendingPercentage (book not loaded yet)');
+        return;
+      }
+      if (locationsReady) {
+        var cfi = book.locations.cfiFromPercentage(pct);
+        log('cfiFromPercentage → ' + (cfi ? cfi : 'null/empty'));
+        if (cfi) {
+          rendition.display(cfi).then(function() {
+            log('display(cfi) resolved');
+          }).catch(function(e) {
+            log('display(cfi) error: ' + e);
+          });
+          return;
+        }
+        log('cfi was empty, falling through to spine fallback');
+      }
+      // Fallback: navigate by spine index (more reliable than href for base64-loaded epubs)
+      var items = book.spine ? book.spine.items : [];
+      var idx = Math.min(Math.floor(pct * items.length), items.length - 1);
+      var item = items[idx];
+      log('spine fallback: spineCount=' + items.length + ' idx=' + idx + ' href=' + (item ? item.href : 'none'));
+      rendition.display(idx).then(function() {
+        log('display(idx=' + idx + ') resolved');
+      }).catch(function(e) {
+        log('display(idx) error: ' + e);
+      });
+    }
 
     function send(data) {
       try {
@@ -112,6 +154,10 @@ export function buildEpubHtml(theme: EpubTheme): string {
           window.ReactNativeWebView.postMessage(JSON.stringify(data));
         }
       } catch(e) {}
+    }
+
+    function log(msg) {
+      send({ type: 'log', message: '[epub] ' + msg });
     }
 
     function showError(msg) {
@@ -154,11 +200,34 @@ export function buildEpubHtml(theme: EpubTheme): string {
         rendition.display(displayCfi).then(function() {
           document.getElementById('loading').style.display = 'none';
           send({ type: 'ready' });
+          log('book displayed, spineItems=' + (book.spine ? book.spine.items.length : 0));
+          // Apply any percentage jump that arrived before the book was loaded
+          if (pendingPercentage !== null) {
+            log('applying pendingPercentage=' + pendingPercentage);
+            var pct = pendingPercentage;
+            pendingPercentage = null;
+            goToPercentage(pct);
+          }
+          // Generate precise locations in background for future jumps
+          book.locations.generate(1024).then(function() {
+            locationsReady = true;
+            log('locations.generate() done, count=' + book.locations.length());
+            // Re-emit current location with accurate percentage now that locations are ready
+            var loc = rendition.currentLocation();
+            if (loc && loc.start && loc.start.cfi) {
+              var pct = book.locations.percentageFromCfi(loc.start.cfi);
+              log('post-generate pct update: ' + pct);
+              send({ type: 'locationChanged', cfi: loc.start.cfi, percentage: pct });
+            }
+          }).catch(function(err) {
+            log('locations.generate() error: ' + (err && err.message ? err.message : String(err)));
+          });
         }).catch(function(err) {
           showError(err && err.message ? err.message : String(err));
         });
 
         rendition.on('relocated', function(location) {
+          log('relocated cfi=' + location.start.cfi + ' pct=' + (location.start.percentage || 0));
           send({
             type: 'locationChanged',
             cfi: location.start.cfi,
@@ -240,6 +309,9 @@ export function buildEpubHtml(theme: EpubTheme): string {
             break;
           case 'goToCfi':
             if (rendition) rendition.display(data.cfi);
+            break;
+          case 'goToPercentage':
+            goToPercentage(data.percentage);
             break;
           case 'setTheme':
             applyTheme(data.theme);

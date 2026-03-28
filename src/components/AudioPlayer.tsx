@@ -17,6 +17,8 @@ interface Props {
   fileIndex: number; // saved track index
   savedPosition: number; // seconds within that track
   onPositionChange: (fileIndex: number, seconds: number) => void;
+  /** Called once per track when its duration becomes known */
+  onDurationLoaded?: (fileIndex: number, seconds: number) => void;
   bookTitle: string;
   /** If true, renders a compact strip instead of the full player */
   compact?: boolean;
@@ -27,6 +29,7 @@ export default function AudioPlayer({
   fileIndex,
   savedPosition,
   onPositionChange,
+  onDurationLoaded,
   bookTitle,
   compact = false,
 }: Props) {
@@ -48,10 +51,14 @@ export default function AudioPlayer({
   urisRef.current = uris;
   const onPositionChangeRef = useRef(onPositionChange);
   onPositionChangeRef.current = onPositionChange;
+  const onDurationLoadedRef = useRef(onDurationLoaded);
+  onDurationLoadedRef.current = onDurationLoaded;
   const currentIndexRef = useRef(currentIndex);
   currentIndexRef.current = currentIndex;
   const speedIndexRef = useRef(speedIndex);
   speedIndexRef.current = speedIndex;
+  // Track whether we've reported duration for the current track
+  const durationReportedRef = useRef(false);
 
   // Load sound whenever the active track changes
   useEffect(() => {
@@ -60,6 +67,7 @@ export default function AudioPlayer({
     if (!uri) return;
 
     setLoading(true);
+    durationReportedRef.current = false;
     setStatus({ isLoaded: false, isPlaying: false, positionMs: 0, durationMs: 0, isBuffering: false });
 
     (async () => {
@@ -94,11 +102,16 @@ export default function AudioPlayer({
               }
               return;
             }
+            const durationMs = st.durationMillis ?? 0;
+            if (!durationReportedRef.current && durationMs > 0) {
+              durationReportedRef.current = true;
+              onDurationLoadedRef.current?.(currentIndexRef.current, durationMs / 1000);
+            }
             setStatus({
               isLoaded: true,
               isPlaying: st.isPlaying,
               positionMs: st.positionMillis,
-              durationMs: st.durationMillis ?? 0,
+              durationMs,
               isBuffering: st.isBuffering,
             });
           },
