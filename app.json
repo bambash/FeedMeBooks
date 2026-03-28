@@ -44,8 +44,7 @@
         {
           "iCloudContainerEnvironment": "Production"
         }
-      ],
-      "whisper.rn"
+      ]
     ],
     "experiments": {
       "typedRoutes": true
