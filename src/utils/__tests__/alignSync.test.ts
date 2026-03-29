@@ -10,8 +10,8 @@ import type { TranscribeSegment } from '../transcribeAudio';
 
 // ─── helpers ────────────────────────────────────────────────────────────────
 
-function seg(t0Ms: number, text: string): TranscribeSegment {
-  return { t0Ms, t1Ms: t0Ms + 500, text };
+function seg(t0Ms: number, t1Ms: number, text: string): TranscribeSegment {
+  return { t0Ms, t1Ms, text };
 }
 
 function pt(audioMs: number, chapterIndex: number): SyncPoint {
@@ -21,55 +21,76 @@ function pt(audioMs: number, chapterIndex: number): SyncPoint {
 // ─── buildSyncPoints ─────────────────────────────────────────────────────────
 
 describe('buildSyncPoints', () => {
-  it('returns empty array when segments or chapters are empty', () => {
-    const chapters: ChapterText[] = [{ chapterIndex: 0, text: 'hello world' }];
-    const segments: TranscribeSegment[] = [seg(0, 'hello')];
-    expect(buildSyncPoints([], chapters, 60_000)).toEqual([]);
+  it('returns empty array when chapters are empty', () => {
+    const segments: TranscribeSegment[] = [seg(0, 500, 'hello')];
     expect(buildSyncPoints(segments, [], 60_000)).toEqual([]);
   });
 
-  it('assigns a single chapter when all words match it', () => {
-    const segments = [seg(0, 'alpha'), seg(500, 'beta'), seg(1000, 'gamma')];
-    const chapters = [
-      { chapterIndex: 0, text: 'alpha beta gamma delta' },
-      { chapterIndex: 1, text: 'totally different content here' },
+  it('returns empty array when all chapters have empty text', () => {
+    const chapters: ChapterText[] = [
+      { chapterIndex: 0, text: '' },
+      { chapterIndex: 1, text: '   ' },
     ];
-    const points = buildSyncPoints(segments, chapters, 60_000);
-    expect(points.every(p => p.chapterIndex === 0)).toBe(true);
+    expect(buildSyncPoints([], chapters, 60_000)).toEqual([]);
   });
 
-  it('advances to a later chapter when transcript matches it better', () => {
-    // First 30 s: words from ch0; from 30 s: words from ch1
-    const segments = [
-      seg(0, 'alpha'), seg(500, 'beta'), seg(1000, 'gamma'),
-      seg(30_000, 'delta'), seg(30_500, 'epsilon'), seg(31_000, 'zeta'),
+  it('skips chapters with no text content', () => {
+    const chapters: ChapterText[] = [
+      { chapterIndex: 0, text: '' },          // no text — skipped
+      { chapterIndex: 1, text: 'hello world' }, // has text
     ];
-    const chapters = [
-      { chapterIndex: 0, text: 'alpha beta gamma filler' },
-      { chapterIndex: 1, text: 'delta epsilon zeta filler' },
-    ];
-    const points = buildSyncPoints(segments, chapters, 60_000);
-    const indices = points.map(p => p.chapterIndex);
-    expect(indices).toContain(0);
-    expect(indices).toContain(1);
-    // chapter index must never go backwards
-    for (let i = 1; i < indices.length; i++) {
-      expect(indices[i]).toBeGreaterThanOrEqual(indices[i - 1]);
-    }
+    const points = buildSyncPoints([], chapters, 60_000);
+    expect(points).toHaveLength(1);
+    expect(points[0].chapterIndex).toBe(1);
   });
 
-  it('never decreases chapter index (monotonicity)', () => {
-    const segments = Array.from({ length: 12 }, (_, i) =>
-      seg(i * 5_000, `word${i % 4}`),
-    );
-    const chapters = [
-      { chapterIndex: 0, text: 'word0 word1 filler' },
-      { chapterIndex: 1, text: 'word2 word3 filler' },
+  it('maps a single chapter to audioMs=0', () => {
+    const chapters: ChapterText[] = [{ chapterIndex: 0, text: 'some content here' }];
+    const points = buildSyncPoints([], chapters, 60_000);
+    expect(points).toHaveLength(1);
+    expect(points[0]).toMatchObject({ audioMs: 0, chapterIndex: 0, fileIndex: 0 });
+  });
+
+  it('divides audio time proportionally by chapter text length', () => {
+    // ch0 = 1000 chars, ch1 = 3000 chars → ch0 gets first 25%, ch1 gets remaining 75%
+    const chapters: ChapterText[] = [
+      { chapterIndex: 0, text: 'a'.repeat(1000) },
+      { chapterIndex: 1, text: 'b'.repeat(3000) },
     ];
-    const points = buildSyncPoints(segments, chapters, 120_000);
+    const points = buildSyncPoints([], chapters, 100_000);
+    expect(points).toHaveLength(2);
+    expect(points[0]).toMatchObject({ audioMs: 0, chapterIndex: 0 });
+    expect(points[1]).toMatchObject({ audioMs: 25_000, chapterIndex: 1 });
+  });
+
+  it('produces one point per non-empty chapter in ascending audioMs order', () => {
+    const chapters: ChapterText[] = [
+      { chapterIndex: 0, text: 'a'.repeat(100) },
+      { chapterIndex: 1, text: '' },           // skipped
+      { chapterIndex: 2, text: 'b'.repeat(200) },
+      { chapterIndex: 3, text: 'c'.repeat(100) },
+    ];
+    const points = buildSyncPoints([], chapters, 120_000);
+    expect(points).toHaveLength(3);
+    const indices = points.map((p) => p.chapterIndex);
+    expect(indices).toEqual([0, 2, 3]);
+    // Ascending audioMs
     for (let i = 1; i < points.length; i++) {
-      expect(points[i].chapterIndex).toBeGreaterThanOrEqual(points[i - 1].chapterIndex);
+      expect(points[i].audioMs).toBeGreaterThan(points[i - 1].audioMs);
     }
+  });
+
+  it('falls back to segment-derived duration when totalMs is 0', () => {
+    const chapters: ChapterText[] = [
+      { chapterIndex: 0, text: 'a'.repeat(1000) },
+      { chapterIndex: 1, text: 'b'.repeat(1000) },
+    ];
+    // Last segment ends at 80_000 ms → that becomes effectiveTotalMs
+    const segments: TranscribeSegment[] = [seg(0, 40_000, 'x'), seg(40_000, 80_000, 'y')];
+    const points = buildSyncPoints(segments, chapters, 0);
+    expect(points).toHaveLength(2);
+    expect(points[0].audioMs).toBe(0);
+    expect(points[1].audioMs).toBe(40_000); // 50% of 80_000
   });
 });
 

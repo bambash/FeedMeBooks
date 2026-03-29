@@ -4,20 +4,19 @@
  * Takes word-level Whisper transcript segments and epub chapter texts,
  * produces a SyncMap: a sorted list of (audioMs → chapterIndex) points.
  *
- * Algorithm: sliding 30-second windows over the full transcript.
- * For each window we compute Jaccard text similarity against the current
- * chapter and up to LOOKAHEAD chapters ahead, advancing the chapter pointer
- * when a better match is found (monotone — chapter order is preserved).
+ * Algorithm: proportional text-length mapping.
+ * Each non-empty chapter is assumed to occupy an audio time range
+ * proportional to its share of total book text length. This is narrator-
+ * rate-agnostic and works without complex vocabulary matching.
+ *
+ * A Jaccard sliding window approach was tried first but failed in practice
+ * because: (a) chapter vocabulary sets are far larger than 30-second windows
+ * (Jaccard penalises large sets heavily), and (b) shared proper nouns across
+ * chapters make relative scores indistinguishable.
  */
 
 import type { SyncPoint } from '../types';
 import type { TranscribeSegment } from './transcribeAudio';
-
-// ─── Alignment config ────────────────────────────────────────────────────────
-
-const WINDOW_MS = 30_000; // comparison window width (ms)
-const STEP_MS   = 10_000; // how far to advance per iteration (ms)
-const LOOKAHEAD = 3;      // max chapters to search ahead at each step
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -27,91 +26,54 @@ export interface ChapterText {
   text: string;
 }
 
-// ─── Text helpers ────────────────────────────────────────────────────────────
-
-/** Tokenise text into lowercase alphanumeric words */
-function tokenize(text: string): string[] {
-  return text.toLowerCase().match(/[a-z0-9]+/g) ?? [];
-}
-
-/**
- * Jaccard similarity (|A∩B| / |A∪B|) between two word arrays.
- * Uses Set semantics so duplicate words don't inflate the score.
- */
-function jaccard(a: string[], b: string[]): number {
-  if (!a.length || !b.length) return 0;
-  const setA = new Set(a);
-  const setB = new Set(b);
-  let inter = 0;
-  for (const w of setA) if (setB.has(w)) inter++;
-  const union = setA.size + setB.size - inter;
-  return union === 0 ? 0 : inter / union;
-}
-
 // ─── Core alignment ──────────────────────────────────────────────────────────
 
 /**
- * Build a list of sync points from transcript segments and chapter texts.
+ * Build a list of sync points from chapter texts and total audio duration.
  *
- * @param segments   Word-level segments; t0Ms is offset from audiobook start (ms)
- * @param chapters   Epub chapter texts (chapterIndex = spine index, 0-based)
- * @param totalMs    Total audiobook duration in ms
- * @returns          Sync points, sorted ascending by audioMs, fileIndex/fileSeconds = 0
- *                   (call fillFilePositions() afterwards to populate those fields)
+ * Each non-empty chapter gets one sync point whose audioMs is derived by
+ * dividing the timeline proportionally by chapter text length.
+ *
+ * @param segments  Word-level segments (used only to derive totalMs if caller
+ *                  passes 0; otherwise unused in the proportional algorithm)
+ * @param chapters  Epub chapter texts (chapterIndex = spine index, 0-based)
+ * @param totalMs   Total audiobook duration in ms
  */
 export function buildSyncPoints(
   segments: TranscribeSegment[],
   chapters: ChapterText[],
   totalMs: number,
 ): SyncPoint[] {
-  if (!segments.length || !chapters.length) return [];
+  // Fall back to segment-derived duration if caller could not supply totalMs
+  const effectiveTotalMs =
+    totalMs > 0
+      ? totalMs
+      : segments.length > 0
+        ? Math.max(...segments.map((s) => s.t1Ms))
+        : 0;
 
-  // Pre-tokenise all chapters once — expensive but done only at index time
-  const chapterTokens = chapters.map((c) => tokenize(c.text));
+  if (!effectiveTotalMs || !chapters.length) return [];
+
+  // Only chapters with actual text contribute to the timeline
+  const contentChapters = chapters.filter((c) => c.text.trim().length > 0);
+  if (!contentChapters.length) return [];
+
+  const totalChars = contentChapters.reduce((sum, c) => sum + c.text.length, 0);
+  if (!totalChars) return [];
 
   const points: SyncPoint[] = [];
-  let currentChapterIdx = 0;
+  let cumChars = 0;
 
-  for (let windowStart = 0; windowStart < totalMs; windowStart += STEP_MS) {
-    const windowEnd = windowStart + WINDOW_MS;
-
-    // Words in this time window
-    const windowWords = segments
-      .filter((s) => s.t0Ms >= windowStart && s.t0Ms < windowEnd)
-      .map((s) => s.text)
-      .join(' ');
-    const windowTokens = tokenize(windowWords);
-
-    if (!windowTokens.length) continue;
-
-    // Find best-scoring chapter, capped at LOOKAHEAD ahead
-    let bestScore = 0;
-    let bestChapter = currentChapterIdx;
-    const maxC = Math.min(currentChapterIdx + LOOKAHEAD, chapters.length - 1);
-
-    for (let c = currentChapterIdx; c <= maxC; c++) {
-      const score = jaccard(windowTokens, chapterTokens[c]);
-      if (score > bestScore) {
-        bestScore = score;
-        bestChapter = c;
-      }
-    }
-
-    if (bestChapter > currentChapterIdx) {
-      currentChapterIdx = bestChapter;
-    }
-
-    // Emit a point only when the chapter changes (or at the very start)
-    const last = points[points.length - 1];
-    if (!last || last.chapterIndex !== currentChapterIdx) {
-      points.push({
-        audioMs: windowStart,
-        fileIndex: 0,              // filled in by fillFilePositions()
-        fileSeconds: 0,
-        chapterIndex: currentChapterIdx,
-        withinChapterFraction: 0,
-      });
-    }
+  for (const chapter of contentChapters) {
+    const audioMs = Math.round((cumChars / totalChars) * effectiveTotalMs);
+    points.push({
+      audioMs,
+      fileIndex: 0,          // filled in by fillFilePositions()
+      fileSeconds: 0,
+      chapterIndex: chapter.chapterIndex,
+      withinChapterFraction: 0,
+    });
+    cumChars += chapter.text.length;
   }
 
   return points;
@@ -165,3 +127,4 @@ export function lookupByAudio(points: SyncPoint[], audioMs: number): SyncPoint |
 export function lookupByChapter(points: SyncPoint[], chapterIndex: number): SyncPoint | null {
   return points.find((p) => p.chapterIndex >= chapterIndex) ?? points[points.length - 1] ?? null;
 }
+

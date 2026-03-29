@@ -175,9 +175,12 @@ export default function ReaderScreen() {
 
         if (indexCancelledRef.current) { releaseWhisperContext(); return; }
 
-        // Transcribe each audio file, offsetting timestamps to be relative to audiobook start
+        // Transcribe each audio file, offsetting timestamps to be relative to audiobook start.
+        // We derive per-file durations from the whisper segments themselves (last segment t1Ms)
+        // rather than from audioFileDurations in the store, which may be unpopulated for files
+        // the user hasn't played yet.
         const audioUris = b.audioUris!;
-        const fileDurationsMs = (b.session.audioFileDurations ?? []).map((d) => (d ?? 0) * 1000);
+        const actualFileDurationsMs: number[] = [];
         let cumulativeMs = 0;
         const allSegments: Awaited<ReturnType<typeof transcribeFile>> = [];
 
@@ -217,11 +220,15 @@ export default function ReaderScreen() {
             await saveFileSegments(b.id, i, segs, audioUris);
           }
 
+          // Derive this file's duration from its last segment (whisper knows the file length)
+          const fileDurationMs = segs.length > 0 ? segs[segs.length - 1].t1Ms : 0;
+          actualFileDurationsMs.push(fileDurationMs);
+
           // Offset segment timestamps so they're relative to the whole audiobook
           for (const s of segs) {
             allSegments.push({ ...s, t0Ms: s.t0Ms + cumulativeMs, t1Ms: s.t1Ms + cumulativeMs });
           }
-          cumulativeMs += fileDurationsMs[i] ?? 0;
+          cumulativeMs += fileDurationMs;
         }
 
         releaseWhisperContext();
@@ -231,7 +238,7 @@ export default function ReaderScreen() {
         // Align transcript to epub chapters
         setIndexStatus({ phase: 'aligning', progress: 0 });
         let points = buildSyncPoints(allSegments, chaptersRef.current, cumulativeMs);
-        points = fillFilePositions(points, fileDurationsMs);
+        points = fillFilePositions(points, actualFileDurationsMs);
         handleLog(`[index] alignment done — ${points.length} sync points`);
 
         if (indexCancelledRef.current) return;
