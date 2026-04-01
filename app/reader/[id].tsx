@@ -307,6 +307,13 @@ export default function ReaderScreen() {
           if (currentMap?.points.length && pct > 0.01) {
             const currentAudioMs = elapsed * 1000;
             const pt = lookupByAudio(currentMap.points, currentAudioMs);
+            handleLog(
+              `[sync] lookup: fileIdx=${b.session.audioFileIndex} pos=${b.session.audioPosition.toFixed(1)}s` +
+              ` elapsed=${elapsed.toFixed(0)}s currentAudioMs=${currentAudioMs}` +
+              ` mapTotalMs=${currentMap.totalAudioMs} points=${currentMap.points.length}` +
+              ` firstPtMs=${currentMap.points[0]?.audioMs} lastPtMs=${currentMap.points[currentMap.points.length - 1]?.audioMs}` +
+              ` → ch=${pt?.chapterIndex ?? 'null'}`,
+            );
             if (pt) {
               setSyncBanner({ targetMode: 'ebook', percentage: pct, targetChapterIndex: pt.chapterIndex });
             }
