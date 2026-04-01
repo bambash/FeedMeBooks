@@ -10,12 +10,15 @@
  *     { type: 'prev' }
  *     { type: 'goToCfi', cfi: string }
  *     { type: 'goToPercentage', percentage: number }  // 0-1, requires locations to be generated
+ *     { type: 'goToChapter', chapterIndex: number }   // jump to spine item by index
+ *     { type: 'extractText' }                         // extract all chapter texts for sync indexing
  *     { type: 'setTheme', theme: ThemeData }
  *     { type: 'setFontSize', size: number }
  *
  *   WebView → RN (postMessage via ReactNativeWebView):
  *     { type: 'ready' }
  *     { type: 'locationChanged', cfi: string, percentage: number }
+ *     { type: 'textExtracted', chapters: Array<{chapterIndex: number, text: string}> }
  *     { type: 'error', message: string }
  */
 
@@ -138,6 +141,11 @@ export function buildEpubHtml(theme: EpubTheme): string {
       }
       // Fallback: navigate by spine index (more reliable than href for base64-loaded epubs)
       var items = book.spine ? book.spine.items : [];
+      if (!items.length) {
+        pendingPercentage = pct;
+        log('spine not ready yet, queued as pendingPercentage');
+        return;
+      }
       var idx = Math.min(Math.floor(pct * items.length), items.length - 1);
       var item = items[idx];
       log('spine fallback: spineCount=' + items.length + ' idx=' + idx + ' href=' + (item ? item.href : 'none'));
@@ -295,6 +303,8 @@ export function buildEpubHtml(theme: EpubTheme): string {
 
     // Message handler from React Native
     function handleMessage(event) {
+      // epub.js / JSZip post internal messages (e.g. setImmediate shims) — ignore non-JSON
+      if (!event.data || typeof event.data !== 'string' || event.data[0] !== '{') return;
       try {
         var data = JSON.parse(event.data);
         switch (data.type) {
@@ -321,8 +331,101 @@ export function buildEpubHtml(theme: EpubTheme): string {
               rendition.themes.fontSize(data.size + 'px');
             }
             break;
+          case 'goToChapter':
+            if (rendition) {
+              var ci = parseInt(data.chapterIndex, 10);
+              log('goToChapter(' + ci + ')');
+              rendition.display(ci).then(function() {
+                log('display(chapter=' + ci + ') resolved');
+              }).catch(function(e) {
+                log('display(chapter) error: ' + e);
+              });
+            }
+            break;
+          case 'extractText':
+            extractAllChapterText();
+            break;
         }
-      } catch(e) {}
+      } catch(e) { log('handleMessage error: ' + e); }
+    }
+
+    /**
+     * Walk every spine item, collect plain text, and send back a
+     * { type: 'textExtracted', chapters: [{chapterIndex, text}] } message.
+     * Used by the sync-index builder to align transcript against ebook chapters.
+     */
+    function extractAllChapterText() {
+      log('extractAllChapterText: book=' + (book ? 'yes' : 'null'));
+      if (!book || !book.spine) {
+        log('extractAllChapterText: no book/spine, aborting');
+        send({ type: 'textExtracted', chapters: [] });
+        return;
+      }
+      // book.spine.items are raw data objects; book.spine.get(i) returns the
+      // proper Section instance that has .load() / .unload() methods.
+      var itemCount = book.spine.items.length;
+      log('extractAllChapterText: spineItems=' + itemCount);
+      var chapters = [];
+      var i = 0;
+
+      function loadNext() {
+        if (i >= itemCount) {
+          log('extractText done, ' + chapters.length + ' chapters extracted');
+          send({ type: 'textExtracted', chapters: chapters });
+          return;
+        }
+        var idx = i;
+        i++;
+        var item = book.spine.get(idx);
+        log('extractText loading item ' + idx + '/' + itemCount);
+
+        var loadPromise;
+        try {
+          loadPromise = item.load(book.load.bind(book));
+        } catch(loadErr) {
+          log('extractText item.load() threw: ' + loadErr);
+          chapters.push({ chapterIndex: idx, text: '' });
+          loadNext();
+          return;
+        }
+
+        if (!loadPromise || typeof loadPromise.then !== 'function') {
+          log('extractText item.load() returned non-promise for idx=' + idx);
+          chapters.push({ chapterIndex: idx, text: '' });
+          loadNext();
+          return;
+        }
+
+        loadPromise.then(function(doc) {
+          var text = '';
+          try {
+            if (doc && doc.querySelectorAll) {
+              var nodes = doc.querySelectorAll('p, li, h1, h2, h3, h4, h5, h6');
+              var parts = [];
+              nodes.forEach(function(el) {
+                var t = (el.textContent || '').replace(/\\s+/g, ' ').trim();
+                if (t.length >= 20) parts.push(t);
+              });
+              text = parts.join(' ');
+            }
+            if (!text && doc && doc.body) {
+              text = (doc.body.textContent || '').replace(/\\s+/g, ' ').trim();
+            }
+          } catch(parseErr) {
+            log('extractText parse error idx=' + idx + ': ' + parseErr);
+          }
+          log('extractText item ' + idx + ' text.length=' + text.length);
+          chapters.push({ chapterIndex: idx, text: text });
+          try { item.unload(); } catch(e) {}
+          loadNext();
+        }).catch(function(err) {
+          log('extractText item ' + idx + ' load failed: ' + err);
+          chapters.push({ chapterIndex: idx, text: '' });
+          loadNext();
+        });
+      }
+
+      loadNext();
     }
 
     // Android uses document, iOS uses window

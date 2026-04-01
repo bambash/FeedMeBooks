@@ -14,6 +14,9 @@ interface Props {
   darkMode?: boolean;
   fontSize?: number;
   targetPercentage?: number | null;
+  targetChapter?: number | null;
+  textExtractRequest?: number;
+  onTextExtracted?: (chapters: { chapterIndex: number; text: string }[]) => void;
   onLog?: (message: string) => void;
 }
 
@@ -25,6 +28,9 @@ export default function EbookReader({
   darkMode = true,
   fontSize = 18,
   targetPercentage,
+  targetChapter,
+  textExtractRequest,
+  onTextExtracted,
   onLog,
 }: Props) {
   switch (format) {
@@ -37,6 +43,9 @@ export default function EbookReader({
           darkMode={darkMode}
           fontSize={fontSize}
           targetPercentage={targetPercentage}
+          targetChapter={targetChapter}
+          textExtractRequest={textExtractRequest}
+          onTextExtracted={onTextExtracted}
           onLog={onLog}
         />
       );

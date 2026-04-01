@@ -1,0 +1,66 @@
+# Builds the word-level sync index for the lorem-ipsum test book,
+# then verifies that mode-switching offers a chapter-accurate sync banner.
+#
+# Run after 00-add-book.yaml:
+#   maestro test .maestro/01-build-sync-index.yaml
+#
+# Note: Whisper transcription of 3 × ~30 s clips takes ~2–5 min on a mid-range
+#       device. The flow uses a 600-second timeout on the "Indexed" assertion.
+appId: com.feedmebooks.app
+---
+- launchApp
+
+# Open the test book
+- assertVisible: "Lorem Ipsum Test Book"
+- tapOn:
+    text: "Lorem Ipsum Test Book"
+
+# Must be in Read (ebook) mode for Build Index to be available
+- assertVisible:
+    id: "settings-btn"
+
+# Open settings
+- tapOn:
+    id: "settings-btn"
+
+# Build Index button should appear (book has both epub + audio)
+- assertVisible:
+    id: "settings-build-index-btn"
+- tapOn:
+    id: "settings-build-index-btn"
+
+# Close settings to reduce UI noise during indexing
+- tapOn:
+    id: "settings-btn"
+
+# Wait for indexing to complete — "Indexed on …" appears in settings
+# Timeout: 10 min to accommodate model download on first run
+- tapOn:
+    id: "settings-btn"
+- assertVisible:
+    text: "Indexed"
+    timeout: 600000
+
+# Close settings
+- tapOn:
+    id: "settings-btn"
+
+# ── Verify chapter sync banner ────────────────────────────────────────────────
+# Switch to Listen mode — should trigger sync banner
+- tapOn:
+    text: "Listen"
+
+# Switch back to Read — the sync banner should show "Jump to chapter X"
+- tapOn:
+    text: "Read"
+
+- assertVisible:
+    text: "chapter"
+    timeout: 3000
+
+# Accept the sync jump
+- tapOn:
+    id: "sync-banner-jump-btn"
+
+# Verify we're back in Read mode (no crash)
+- assertVisible: "Listen"

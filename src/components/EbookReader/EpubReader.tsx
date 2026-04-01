@@ -14,6 +14,15 @@ interface Props {
   fontSize?: number;
   /** When set to a 0-1 percentage, EpubReader will navigate to that position */
   targetPercentage?: number | null;
+  /** When set, navigate to this epub spine chapter index */
+  targetChapter?: number | null;
+  /**
+   * Increment this counter to trigger epub text extraction.
+   * EpubReader will send {type:'extractText'} to the WebView and call onTextExtracted.
+   */
+  textExtractRequest?: number;
+  /** Receives chapter texts extracted from the epub (response to textExtractRequest) */
+  onTextExtracted?: (chapters: { chapterIndex: number; text: string }[]) => void;
   /** Dev-mode log sink — receives timestamped messages from both RN and WebView layers */
   onLog?: (message: string) => void;
 }
@@ -25,6 +34,9 @@ export default function EpubReader({
   darkMode = true,
   fontSize = 18,
   targetPercentage,
+  targetChapter,
+  textExtractRequest = 0,
+  onTextExtracted,
   onLog,
 }: Props) {
   const webViewRef = useRef<WebView>(null);
@@ -42,6 +54,10 @@ export default function EpubReader({
   targetPercentageRef.current = targetPercentage ?? null;
   const onLogRef = useRef(onLog);
   onLogRef.current = onLog;
+  const onTextExtractedRef = useRef(onTextExtracted);
+  onTextExtractedRef.current = onTextExtracted;
+  // Track last sent targetChapter to avoid duplicates
+  const sentChapterRef = useRef<number | null>(null);
 
   const rnLog = useCallback((msg: string) => {
     onLogRef.current?.(`[rn] ${msg}`);
@@ -112,6 +128,27 @@ export default function EpubReader({
     }
   }, [darkMode, fontSize]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Navigate to a specific spine chapter when targetChapter changes
+  useEffect(() => {
+    if (
+      targetChapter != null &&
+      webViewReadyRef.current &&
+      targetChapter !== sentChapterRef.current
+    ) {
+      sentChapterRef.current = targetChapter;
+      rnLog('sending goToChapter chapterIndex=' + targetChapter);
+      sendToWebView({ type: 'goToChapter', chapterIndex: targetChapter });
+    }
+  }, [targetChapter, sendToWebView, rnLog]);
+
+  // Trigger epub text extraction when counter increments
+  useEffect(() => {
+    if (textExtractRequest > 0 && !loading) {
+      rnLog('sending extractText request=' + textExtractRequest);
+      sendToWebView({ type: 'extractText' });
+    }
+  }, [textExtractRequest]); // eslint-disable-line react-hooks/exhaustive-deps
+
   // Navigate to a percentage position when targetPercentage changes
   useEffect(() => {
     rnLog('targetPercentage effect pct=' + targetPercentage + ' webViewReady=' + webViewReadyRef.current + ' alreadySent=' + (targetPercentage === sentPercentageRef.current));
@@ -134,6 +171,8 @@ export default function EpubReader({
           setLoading(false);
         } else if (data.type === 'locationChanged') {
           onPositionChange({ cfi: data.cfi, percentage: data.percentage });
+        } else if (data.type === 'textExtracted') {
+          onTextExtractedRef.current?.(data.chapters ?? []);
         } else if (data.type === 'log') {
           onLogRef.current?.(data.message);
         }

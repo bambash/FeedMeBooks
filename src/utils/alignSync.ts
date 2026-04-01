@@ -1,0 +1,130 @@
+/**
+ * Audio↔ebook alignment.
+ *
+ * Takes word-level Whisper transcript segments and epub chapter texts,
+ * produces a SyncMap: a sorted list of (audioMs → chapterIndex) points.
+ *
+ * Algorithm: proportional text-length mapping.
+ * Each non-empty chapter is assumed to occupy an audio time range
+ * proportional to its share of total book text length. This is narrator-
+ * rate-agnostic and works without complex vocabulary matching.
+ *
+ * A Jaccard sliding window approach was tried first but failed in practice
+ * because: (a) chapter vocabulary sets are far larger than 30-second windows
+ * (Jaccard penalises large sets heavily), and (b) shared proper nouns across
+ * chapters make relative scores indistinguishable.
+ */
+
+import type { SyncPoint } from '../types';
+import type { TranscribeSegment } from './transcribeAudio';
+
+// ─── Types ───────────────────────────────────────────────────────────────────
+
+export interface ChapterText {
+  chapterIndex: number;
+  /** Full plain text of the chapter (whitespace-normalised) */
+  text: string;
+}
+
+// ─── Core alignment ──────────────────────────────────────────────────────────
+
+/**
+ * Build a list of sync points from chapter texts and total audio duration.
+ *
+ * Each non-empty chapter gets one sync point whose audioMs is derived by
+ * dividing the timeline proportionally by chapter text length.
+ *
+ * @param segments  Word-level segments (used only to derive totalMs if caller
+ *                  passes 0; otherwise unused in the proportional algorithm)
+ * @param chapters  Epub chapter texts (chapterIndex = spine index, 0-based)
+ * @param totalMs   Total audiobook duration in ms
+ */
+export function buildSyncPoints(
+  segments: TranscribeSegment[],
+  chapters: ChapterText[],
+  totalMs: number,
+): SyncPoint[] {
+  // Fall back to segment-derived duration if caller could not supply totalMs
+  const effectiveTotalMs =
+    totalMs > 0
+      ? totalMs
+      : segments.length > 0
+        ? Math.max(...segments.map((s) => s.t1Ms))
+        : 0;
+
+  if (!effectiveTotalMs || !chapters.length) return [];
+
+  // Only chapters with actual text contribute to the timeline
+  const contentChapters = chapters.filter((c) => c.text.trim().length > 0);
+  if (!contentChapters.length) return [];
+
+  const totalChars = contentChapters.reduce((sum, c) => sum + c.text.length, 0);
+  if (!totalChars) return [];
+
+  const points: SyncPoint[] = [];
+  let cumChars = 0;
+
+  for (const chapter of contentChapters) {
+    const audioMs = Math.round((cumChars / totalChars) * effectiveTotalMs);
+    points.push({
+      audioMs,
+      fileIndex: 0,          // filled in by fillFilePositions()
+      fileSeconds: 0,
+      chapterIndex: chapter.chapterIndex,
+      withinChapterFraction: 0,
+    });
+    cumChars += chapter.text.length;
+  }
+
+  return points;
+}
+
+/**
+ * Populate fileIndex and fileSeconds on each SyncPoint from cumulative durations.
+ * @param fileDurationsMs  Duration (ms) of each audio file in order
+ */
+export function fillFilePositions(
+  points: SyncPoint[],
+  fileDurationsMs: number[],
+): SyncPoint[] {
+  return points.map((pt) => {
+    let cum = 0;
+    for (let i = 0; i < fileDurationsMs.length; i++) {
+      const d = fileDurationsMs[i] ?? 0;
+      if (cum + d > pt.audioMs) {
+        return { ...pt, fileIndex: i, fileSeconds: (pt.audioMs - cum) / 1000 };
+      }
+      cum += d;
+    }
+    // Clamp to last file
+    const last = fileDurationsMs.length - 1;
+    return { ...pt, fileIndex: Math.max(0, last), fileSeconds: (fileDurationsMs[last] ?? 0) / 1000 };
+  });
+}
+
+// ─── Lookup helpers ──────────────────────────────────────────────────────────
+
+/**
+ * Return the SyncPoint whose audioMs is ≤ the given time (binary search).
+ * Returns null if points is empty.
+ */
+export function lookupByAudio(points: SyncPoint[], audioMs: number): SyncPoint | null {
+  if (!points.length) return null;
+  let lo = 0;
+  let hi = points.length - 1;
+  while (lo < hi) {
+    const mid = (lo + hi + 1) >> 1;
+    if (points[mid].audioMs <= audioMs) lo = mid;
+    else hi = mid - 1;
+  }
+  return points[lo];
+}
+
+/**
+ * Return the first SyncPoint whose chapterIndex >= the given index.
+ * Useful for ebook→audio sync.
+ */
+export function lookupByChapter(points: SyncPoint[], chapterIndex: number): SyncPoint | null {
+  return points.find((p) => p.chapterIndex >= chapterIndex) ?? points[points.length - 1] ?? null;
+}
+
