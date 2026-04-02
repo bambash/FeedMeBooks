@@ -17,10 +17,11 @@ import EbookReader from '../../src/components/EbookReader';
 import { useLibraryStore } from '../../src/store/libraryStore';
 import { colors, radius, spacing, typography } from '../../src/theme';
 import type { EbookPosition, ReaderMode, SyncMap } from '../../src/types';
-import { buildSyncPoints, fillFilePositions, lookupByAudio, type ChapterText } from '../../src/utils/alignSync';
-import { downloadModel, isModelDownloaded, releaseWhisperContext, transcribeFile } from '../../src/utils/transcribeAudio';
+import { buildSyncPoints, fillFilePositions, findChapterByWindowText, lookupByAudio, type ChapterText } from '../../src/utils/alignSync';
+import { downloadModel, isModelDownloaded, releaseWhisperContext, transcribeFile, transcribeWindow } from '../../src/utils/transcribeAudio';
 import { deleteSyncMap, loadSyncMap, saveSyncMap } from '../../src/utils/syncMapStorage';
 import { deleteTranscriptionCache, loadCachedFileSegments, loadCacheMeta, saveFileSegments } from '../../src/utils/transcriptionCache';
+import { deleteChapterTexts, loadChapterTexts, saveChapterTexts } from '../../src/utils/chapterTextStorage';
 
 interface SyncBanner {
   targetMode: ReaderMode;
@@ -251,6 +252,7 @@ export default function ReaderScreen() {
         };
         await saveSyncMap(map);
         await deleteTranscriptionCache(b.id);
+        await saveChapterTexts(b.id, chapters);
         setSyncMapCreatedAt(b.id, map.createdAt);
         setSyncMap(map);
         setIndexStatus({ phase: 'done', progress: 1 });
@@ -280,7 +282,7 @@ export default function ReaderScreen() {
   const handleRebuildIndex = useCallback(async () => {
     const b = bookRef.current;
     if (!b) return;
-    await Promise.all([deleteSyncMap(b.id), deleteTranscriptionCache(b.id)]);
+    await Promise.all([deleteSyncMap(b.id), deleteTranscriptionCache(b.id), deleteChapterTexts(b.id)]);
     setSyncMapCreatedAt(b.id, undefined);
     setSyncMap(null);
     setIndexStatus(null);
@@ -316,6 +318,33 @@ export default function ReaderScreen() {
             );
             if (pt) {
               setSyncBanner({ targetMode: 'ebook', percentage: pct, targetChapterIndex: pt.chapterIndex });
+
+              // Kick off a JIT 15-second window scan in the background to refine the estimate.
+              // We capture everything we need now; the async result updates the banner when ready.
+              const audioUri = b.audioUris?.[b.session.audioFileIndex];
+              const posMs = b.session.audioPosition * 1000;
+              const offsetMs = Math.max(0, posMs - 7500); // centre the 15s window on current pos
+              const bookId = b.id;
+              if (audioUri) {
+                isModelDownloaded()
+                  .then((hasModel) => {
+                    if (!hasModel) return;
+                    return loadChapterTexts(bookId).then((chapterTexts) => {
+                      if (!chapterTexts?.length) return;
+                      handleLog(`[sync] JIT scan: file=${b.session.audioFileIndex} offsetMs=${offsetMs}`);
+                      return transcribeWindow(audioUri, offsetMs).then((windowText) => {
+                        const jitChapter = findChapterByWindowText(windowText, chapterTexts);
+                        handleLog(`[sync] JIT result: "${windowText.slice(0, 60)}…" → ch=${jitChapter ?? 'no match'}`);
+                        if (jitChapter != null) {
+                          setSyncBanner((prev) =>
+                            prev ? { ...prev, targetChapterIndex: jitChapter } : prev,
+                          );
+                        }
+                      });
+                    });
+                  })
+                  .catch((err) => handleLog(`[sync] JIT scan error: ${err}`));
+              }
             }
           } else if (pct > 0.01) {
             setSyncBanner({ targetMode: 'ebook', percentage: pct });

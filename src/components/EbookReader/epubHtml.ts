@@ -350,9 +350,14 @@ export function buildEpubHtml(theme: EpubTheme): string {
     }
 
     /**
-     * Walk every spine item, collect plain text, and send back a
+     * Walk epub chapters and collect plain text, then send back a
      * { type: 'textExtracted', chapters: [{chapterIndex, text}] } message.
-     * Used by the sync-index builder to align transcript against ebook chapters.
+     *
+     * Strategy (in order):
+     *  1. book.navigation.toc  — real chapter list from the epub's own TOC.
+     *     Maps each TOC href → spine item; uses the spine item's index as
+     *     chapterIndex so goToChapter() navigation remains correct.
+     *  2. Full spine fallback  — if the TOC is absent/empty, walk all items.
      */
     function extractAllChapterText() {
       log('extractAllChapterText: book=' + (book ? 'yes' : 'null'));
@@ -361,71 +366,121 @@ export function buildEpubHtml(theme: EpubTheme): string {
         send({ type: 'textExtracted', chapters: [] });
         return;
       }
-      // book.spine.items are raw data objects; book.spine.get(i) returns the
-      // proper Section instance that has .load() / .unload() methods.
-      var itemCount = book.spine.items.length;
-      log('extractAllChapterText: spineItems=' + itemCount);
-      var chapters = [];
-      var i = 0;
 
-      function loadNext() {
-        if (i >= itemCount) {
-          log('extractText done, ' + chapters.length + ' chapters extracted');
-          send({ type: 'textExtracted', chapters: chapters });
-          return;
-        }
-        var idx = i;
-        i++;
-        var item = book.spine.get(idx);
-        log('extractText loading item ' + idx + '/' + itemCount);
-
-        var loadPromise;
-        try {
-          loadPromise = item.load(book.load.bind(book));
-        } catch(loadErr) {
-          log('extractText item.load() threw: ' + loadErr);
-          chapters.push({ chapterIndex: idx, text: '' });
-          loadNext();
-          return;
-        }
-
-        if (!loadPromise || typeof loadPromise.then !== 'function') {
-          log('extractText item.load() returned non-promise for idx=' + idx);
-          chapters.push({ chapterIndex: idx, text: '' });
-          loadNext();
-          return;
-        }
-
-        loadPromise.then(function(doc) {
-          var text = '';
-          try {
-            if (doc && doc.querySelectorAll) {
-              var nodes = doc.querySelectorAll('p, li, h1, h2, h3, h4, h5, h6');
-              var parts = [];
-              nodes.forEach(function(el) {
-                var t = (el.textContent || '').replace(/\\s+/g, ' ').trim();
-                if (t.length >= 20) parts.push(t);
-              });
-              text = parts.join(' ');
-            }
-            if (!text && doc && doc.body) {
-              text = (doc.body.textContent || '').replace(/\\s+/g, ' ').trim();
-            }
-          } catch(parseErr) {
-            log('extractText parse error idx=' + idx + ': ' + parseErr);
+      /** Recursively flatten a TOC tree into a flat array of entries. */
+      function flattenToc(items) {
+        var result = [];
+        for (var t = 0; t < items.length; t++) {
+          result.push(items[t]);
+          if (items[t].subitems && items[t].subitems.length) {
+            var sub = flattenToc(items[t].subitems);
+            for (var s = 0; s < sub.length; s++) result.push(sub[s]);
           }
-          log('extractText item ' + idx + ' text.length=' + text.length);
-          chapters.push({ chapterIndex: idx, text: text });
-          try { item.unload(); } catch(e) {}
-          loadNext();
-        }).catch(function(err) {
-          log('extractText item ' + idx + ' load failed: ' + err);
-          chapters.push({ chapterIndex: idx, text: '' });
-          loadNext();
-        });
+        }
+        return result;
       }
 
-      loadNext();
+      /**
+       * Extract text from an ordered array of resolved spine items.
+       * Each item's .index property is used as chapterIndex.
+       */
+      function extractFromItems(spineItems) {
+        var chapters = [];
+        var i = 0;
+
+        function loadNext() {
+          if (i >= spineItems.length) {
+            log('extractText done, ' + chapters.length + ' chapters extracted');
+            send({ type: 'textExtracted', chapters: chapters });
+            return;
+          }
+          var spineItem = spineItems[i];
+          var chapterIndex = spineItem.index;
+          i++;
+          log('extractText loading spineIdx=' + chapterIndex + ' (' + i + '/' + spineItems.length + ')');
+
+          var loadPromise;
+          try {
+            loadPromise = spineItem.load(book.load.bind(book));
+          } catch(loadErr) {
+            log('extractText item.load() threw: ' + loadErr);
+            chapters.push({ chapterIndex: chapterIndex, text: '' });
+            loadNext();
+            return;
+          }
+
+          if (!loadPromise || typeof loadPromise.then !== 'function') {
+            log('extractText item.load() returned non-promise for spineIdx=' + chapterIndex);
+            chapters.push({ chapterIndex: chapterIndex, text: '' });
+            loadNext();
+            return;
+          }
+
+          loadPromise.then(function(doc) {
+            var text = '';
+            try {
+              if (doc && doc.querySelectorAll) {
+                var nodes = doc.querySelectorAll('p, li, h1, h2, h3, h4, h5, h6');
+                var parts = [];
+                nodes.forEach(function(el) {
+                  var t = (el.textContent || '').replace(/\\s+/g, ' ').trim();
+                  if (t.length >= 20) parts.push(t);
+                });
+                text = parts.join(' ');
+              }
+              if (!text && doc && doc.body) {
+                text = (doc.body.textContent || '').replace(/\\s+/g, ' ').trim();
+              }
+            } catch(parseErr) {
+              log('extractText parse error spineIdx=' + chapterIndex + ': ' + parseErr);
+            }
+            log('extractText spineIdx=' + chapterIndex + ' text.length=' + text.length);
+            chapters.push({ chapterIndex: chapterIndex, text: text });
+            try { spineItem.unload(); } catch(e) {}
+            loadNext();
+          }).catch(function(err) {
+            log('extractText spineIdx=' + chapterIndex + ' load failed: ' + err);
+            chapters.push({ chapterIndex: chapterIndex, text: '' });
+            loadNext();
+          });
+        }
+
+        loadNext();
+      }
+
+      // ── 1. Try TOC-based extraction ──────────────────────────────────────
+      var tocSpineItems = [];
+      if (book.navigation && book.navigation.toc && book.navigation.toc.length > 0) {
+        var flatToc = flattenToc(book.navigation.toc);
+        log('extractAllChapterText: TOC has ' + flatToc.length + ' entries');
+        var seenIndices = {};
+        for (var t = 0; t < flatToc.length; t++) {
+          var href = flatToc[t].href || '';
+          var baseHref = href.split('#')[0];
+          if (!baseHref) continue;
+          var spineItem = book.spine.get(baseHref);
+          if (spineItem && !seenIndices[spineItem.index]) {
+            seenIndices[spineItem.index] = true;
+            tocSpineItems.push(spineItem);
+          }
+        }
+        // Sort by spine order so proportional mapping is monotone
+        tocSpineItems.sort(function(a, b) { return a.index - b.index; });
+        log('extractAllChapterText: ' + tocSpineItems.length + ' unique spine items from TOC');
+      }
+
+      if (tocSpineItems.length > 0) {
+        extractFromItems(tocSpineItems);
+        return;
+      }
+
+      // ── 2. Fallback: all spine items ─────────────────────────────────────
+      log('extractAllChapterText: no TOC, using full spine (' + book.spine.items.length + ' items)');
+      var allItems = [];
+      for (var si = 0; si < book.spine.items.length; si++) {
+        allItems.push(book.spine.get(si));
+      }
+      extractFromItems(allItems);
     }
 
     // Android uses document, iOS uses window

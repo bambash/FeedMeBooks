@@ -128,3 +128,41 @@ export function lookupByChapter(points: SyncPoint[], chapterIndex: number): Sync
   return points.find((p) => p.chapterIndex >= chapterIndex) ?? points[points.length - 1] ?? null;
 }
 
+/**
+ * Find the chapter index that best matches a short transcribed audio window.
+ *
+ * Scoring: recall = fraction of unique window words found anywhere in the
+ * chapter text.  Returns null if no chapter scores ≥ 0.25.
+ *
+ * @param windowText   Transcribed text from a 10–15 second audio window
+ * @param chapters     Chapter texts as stored by chapterTextStorage
+ */
+export function findChapterByWindowText(
+  windowText: string,
+  chapters: { chapterIndex: number; text: string }[],
+): number | null {
+  const tokenize = (t: string): string[] => t.toLowerCase().match(/\b[a-z']{2,}\b/g) ?? [];
+
+  const windowTokens = tokenize(windowText);
+  if (!windowTokens.length || !chapters.length) return null;
+
+  const windowSet = new Set(windowTokens);
+  let bestChapter: number | null = null;
+  let bestScore = 0;
+
+  for (const ch of chapters) {
+    const lower = ch.text.toLowerCase();
+    let hits = 0;
+    for (const w of windowSet) {
+      if (lower.includes(w)) hits++;
+    }
+    const score = hits / windowSet.size;
+    if (score > bestScore) {
+      bestScore = score;
+      bestChapter = ch.chapterIndex;
+    }
+  }
+
+  return bestScore >= 0.25 ? bestChapter : null;
+}
+
