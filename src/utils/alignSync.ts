@@ -54,8 +54,10 @@ export function buildSyncPoints(
 
   if (!effectiveTotalMs || !chapters.length) return [];
 
-  // Only chapters with actual text contribute to the timeline
-  const contentChapters = chapters.filter((c) => c.text.trim().length > 0);
+  // Only chapters with substantial text contribute to the timeline.
+  // Threshold of 500 chars filters out part-header pages, copyright pages,
+  // and other spine items that are just titles/headings with no real content.
+  const contentChapters = chapters.filter((c) => c.text.trim().length >= 500);
   if (!contentChapters.length) return [];
 
   const totalChars = contentChapters.reduce((sum, c) => sum + c.text.length, 0);

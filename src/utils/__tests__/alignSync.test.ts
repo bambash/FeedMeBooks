@@ -34,18 +34,19 @@ describe('buildSyncPoints', () => {
     expect(buildSyncPoints([], chapters, 60_000)).toEqual([]);
   });
 
-  it('skips chapters with no text content', () => {
+  it('skips chapters with text shorter than 500 chars', () => {
     const chapters: ChapterText[] = [
-      { chapterIndex: 0, text: '' },          // no text — skipped
-      { chapterIndex: 1, text: 'hello world' }, // has text
+      { chapterIndex: 0, text: '' },               // empty — skipped
+      { chapterIndex: 1, text: 'short header' },    // < 500 chars — skipped (part headers etc.)
+      { chapterIndex: 2, text: 'a'.repeat(500) },   // exactly 500 — kept
     ];
     const points = buildSyncPoints([], chapters, 60_000);
     expect(points).toHaveLength(1);
-    expect(points[0].chapterIndex).toBe(1);
+    expect(points[0].chapterIndex).toBe(2);
   });
 
   it('maps a single chapter to audioMs=0', () => {
-    const chapters: ChapterText[] = [{ chapterIndex: 0, text: 'some content here' }];
+    const chapters: ChapterText[] = [{ chapterIndex: 0, text: 'a'.repeat(500) }];
     const points = buildSyncPoints([], chapters, 60_000);
     expect(points).toHaveLength(1);
     expect(points[0]).toMatchObject({ audioMs: 0, chapterIndex: 0, fileIndex: 0 });
@@ -63,12 +64,12 @@ describe('buildSyncPoints', () => {
     expect(points[1]).toMatchObject({ audioMs: 25_000, chapterIndex: 1 });
   });
 
-  it('produces one point per non-empty chapter in ascending audioMs order', () => {
+  it('produces one point per substantive chapter in ascending audioMs order', () => {
     const chapters: ChapterText[] = [
-      { chapterIndex: 0, text: 'a'.repeat(100) },
-      { chapterIndex: 1, text: '' },           // skipped
-      { chapterIndex: 2, text: 'b'.repeat(200) },
-      { chapterIndex: 3, text: 'c'.repeat(100) },
+      { chapterIndex: 0, text: 'a'.repeat(1000) },
+      { chapterIndex: 1, text: '' },              // empty — skipped
+      { chapterIndex: 2, text: 'b'.repeat(2000) },
+      { chapterIndex: 3, text: 'c'.repeat(1000) },
     ];
     const points = buildSyncPoints([], chapters, 120_000);
     expect(points).toHaveLength(3);

@@ -151,7 +151,8 @@ export default function ReaderScreen() {
     async (chapters: ChapterText[]) => {
       chaptersRef.current = chapters;
       const b = bookRef.current;
-      handleLog(`[index] epub extracted ${chapters.length} chapters`);
+      const substantiveChapters = chapters.filter((c) => c.text.trim().length >= 500);
+      handleLog(`[index] epub extracted ${chapters.length} chapters (${substantiveChapters.length} with content ≥500 chars)`);
       if (!b?.audioUris?.length || !chapters.length) {
         const err = 'No audio or ebook content found';
         handleLog(`[index] error: ${err}`);

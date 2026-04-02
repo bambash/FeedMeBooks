@@ -367,14 +367,15 @@ export function buildEpubHtml(theme: EpubTheme): string {
         return;
       }
 
-      /** Recursively flatten a TOC tree into a flat array of entries. */
-      function flattenToc(items) {
+      /** Return only leaf TOC nodes (entries with no sub-items). */
+      function getTocLeaves(items) {
         var result = [];
         for (var t = 0; t < items.length; t++) {
-          result.push(items[t]);
-          if (items[t].subitems && items[t].subitems.length) {
-            var sub = flattenToc(items[t].subitems);
+          if (items[t].subitems && items[t].subitems.length > 0) {
+            var sub = getTocLeaves(items[t].subitems);
             for (var s = 0; s < sub.length; s++) result.push(sub[s]);
+          } else {
+            result.push(items[t]);
           }
         }
         return result;
@@ -451,7 +452,7 @@ export function buildEpubHtml(theme: EpubTheme): string {
       // ── 1. Try TOC-based extraction ──────────────────────────────────────
       var tocSpineItems = [];
       if (book.navigation && book.navigation.toc && book.navigation.toc.length > 0) {
-        var flatToc = flattenToc(book.navigation.toc);
+        var flatToc = getTocLeaves(book.navigation.toc);
         log('extractAllChapterText: TOC has ' + flatToc.length + ' entries');
         var seenIndices = {};
         for (var t = 0; t < flatToc.length; t++) {
