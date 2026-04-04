@@ -1,5 +1,6 @@
 import {
   buildSyncPoints,
+  buildSyncPointsFromTranscripts,
   fillFilePositions,
   lookupByAudio,
   lookupByChapter,
@@ -172,5 +173,62 @@ describe('lookupByChapter', () => {
 
   it('returns last point when chapter exceeds all', () => {
     expect(lookupByChapter(points, 99)).toBe(points[2]);
+  });
+});
+
+// ─── buildSyncPointsFromTranscripts ─────────────────────────────────────────
+
+describe('buildSyncPointsFromTranscripts', () => {
+  // Build chapter texts with unique vocabulary so matching is unambiguous
+  const chapters: ChapterText[] = [
+    { chapterIndex: 5, text: ('kaladin stormblessed bridge four lopen rock syl ').repeat(100) },
+    { chapterIndex: 10, text: ('shallan davar jasnah kholin pattern cryptic lightweaving ').repeat(100) },
+    { chapterIndex: 15, text: ('dalinar kholin adolin renarin highprince codes urithiru ').repeat(100) },
+  ];
+  const durs = [60_000, 60_000, 60_000];
+
+  it('assigns each file to the chapter whose vocabulary best matches', () => {
+    const transcripts = [
+      'kaladin lopen rock ran across the bridge four times today',
+      'shallan drew jasnah pattern cryptic lightweaving the boat',
+      'dalinar adolin renarin highprince codes the tower urithiru',
+    ];
+    const pts = buildSyncPointsFromTranscripts(transcripts, durs, chapters);
+    expect(pts).toHaveLength(3);
+    expect(pts[0].chapterIndex).toBe(5);
+    expect(pts[1].chapterIndex).toBe(10);
+    expect(pts[2].chapterIndex).toBe(15);
+  });
+
+  it('sets audioMs to cumulative file start time', () => {
+    const transcripts = ['kaladin bridge lopen rock syl', '', ''];
+    const pts = buildSyncPointsFromTranscripts(transcripts, durs, chapters);
+    expect(pts[0].audioMs).toBe(0);
+    expect(pts[1].audioMs).toBe(60_000);
+    expect(pts[2].audioMs).toBe(120_000);
+  });
+
+  it('holds chapter assignment for empty/silent files', () => {
+    // file 0 matches ch5, file 1 is empty → should keep ch5
+    const transcripts = ['kaladin bridge lopen rock syl stormblessed', '', ''];
+    const pts = buildSyncPointsFromTranscripts(transcripts, durs, chapters);
+    expect(pts[1].chapterIndex).toBe(5);
+  });
+
+  it('enforces monotonic chapter ordering', () => {
+    // file 1 transcript matches ch5 (an earlier chapter) — should stay at ch10
+    const transcripts = [
+      'shallan jasnah pattern cryptic lightweaving',  // → ch10
+      'kaladin bridge lopen rock syl',                // words from ch5, but ch5 < ch10 → skip
+      'dalinar adolin renarin urithiru codes',        // → ch15
+    ];
+    const pts = buildSyncPointsFromTranscripts(transcripts, durs, chapters);
+    expect(pts[0].chapterIndex).toBe(10);
+    expect(pts[1].chapterIndex).toBe(10); // held, not regressed to ch5
+    expect(pts[2].chapterIndex).toBe(15);
+  });
+
+  it('returns empty array when chapters is empty', () => {
+    expect(buildSyncPointsFromTranscripts(['hello world'], [60_000], [])).toEqual([]);
   });
 });

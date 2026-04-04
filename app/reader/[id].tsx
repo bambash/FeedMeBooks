@@ -17,7 +17,7 @@ import EbookReader from '../../src/components/EbookReader';
 import { useLibraryStore } from '../../src/store/libraryStore';
 import { colors, radius, spacing, typography } from '../../src/theme';
 import type { EbookPosition, ReaderMode, SyncMap } from '../../src/types';
-import { buildSyncPoints, fillFilePositions, findChapterByWindowText, lookupByAudio, type ChapterText } from '../../src/utils/alignSync';
+import { buildSyncPoints, buildSyncPointsFromTranscripts, fillFilePositions, findChapterByWindowText, lookupByAudio, type ChapterText } from '../../src/utils/alignSync';
 import { downloadModel, isModelDownloaded, releaseWhisperContext, transcribeFile, transcribeWindow } from '../../src/utils/transcribeAudio';
 import { deleteSyncMap, loadSyncMap, saveSyncMap } from '../../src/utils/syncMapStorage';
 import { deleteTranscriptionCache, loadCachedFileSegments, loadCacheMeta, saveFileSegments } from '../../src/utils/transcriptionCache';
@@ -188,6 +188,7 @@ export default function ReaderScreen() {
         // the user hasn't played yet.
         const audioUris = b.audioUris!;
         const actualFileDurationsMs: number[] = [];
+        const fileTranscripts: string[] = []; // one plain-text string per audio file
         let cumulativeMs = 0;
         const allSegments: Awaited<ReturnType<typeof transcribeFile>> = [];
 
@@ -230,6 +231,8 @@ export default function ReaderScreen() {
           // Derive this file's duration from its last segment (whisper knows the file length)
           const fileDurationMs = segs.length > 0 ? segs[segs.length - 1].t1Ms : 0;
           actualFileDurationsMs.push(fileDurationMs);
+          // Collect the full transcript text for this file (used in content-based alignment)
+          fileTranscripts.push(segs.map((s) => s.text).join(' ').trim());
 
           // Offset segment timestamps so they're relative to the whole audiobook
           for (const s of segs) {
@@ -241,12 +244,17 @@ export default function ReaderScreen() {
         releaseWhisperContext();
         if (indexCancelledRef.current) return;
 
-        handleLog(`[index] aligning ${allSegments.length} segments to ${chapters.length} chapters…`);
-        // Align transcript to epub chapters
+        handleLog(`[index] aligning ${fileTranscripts.length} audio files to ${chapters.length} chapters by transcript search…`);
         setIndexStatus({ phase: 'aligning', progress: 0 });
-        let points = buildSyncPoints(allSegments, chaptersRef.current, cumulativeMs);
-        points = fillFilePositions(points, actualFileDurationsMs);
-        handleLog(`[index] alignment done — ${points.length} sync points`);
+        let points = buildSyncPointsFromTranscripts(fileTranscripts, actualFileDurationsMs, chaptersRef.current);
+        if (points.length === 0) {
+          // Fallback: proportional mapping if transcript search produced nothing
+          handleLog('[index] transcript search produced 0 points, falling back to proportional mapping');
+          const propPoints = buildSyncPoints(allSegments, chaptersRef.current, cumulativeMs);
+          points = fillFilePositions(propPoints, actualFileDurationsMs);
+        }
+        const uniqueChapters = new Set(points.map((p) => p.chapterIndex)).size;
+        handleLog(`[index] alignment done — ${points.length} sync points spanning ${uniqueChapters} chapters`);
 
         if (indexCancelledRef.current) return;
 

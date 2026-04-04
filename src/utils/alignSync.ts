@@ -83,6 +83,88 @@ export function buildSyncPoints(
   return points;
 }
 
+// ─── Transcript-based alignment ──────────────────────────────────────────────
+
+const tokenizeWords = (t: string): string[] => t.toLowerCase().match(/\b[a-z']{2,}\b/g) ?? [];
+
+/**
+ * Build a sync map by matching each audio file's full transcript against epub
+ * chapters.  This is far more accurate than proportional mapping because it
+ * uses actual content overlap rather than assuming narrator speed is constant.
+ *
+ * Algorithm:
+ *  - Pre-build a word-set for every chapter (O(Σ chapter text))
+ *  - For each audio file, compute recall = |transcript ∩ chapter| / |transcript|
+ *    for every chapter at or after the last matched chapter (monotonic)
+ *  - Assign the highest-scoring chapter to that file
+ *  - If no chapter exceeds the 0.25 recall threshold, keep the last assignment
+ *
+ * Returns one SyncPoint per audio file (at the file's start position).
+ * fileIndex and fileSeconds are already populated — fillFilePositions is not needed.
+ */
+export function buildSyncPointsFromTranscripts(
+  fileTranscripts: string[],
+  fileDurationsMs: number[],
+  chapters: ChapterText[],
+): SyncPoint[] {
+  const contentChapters = chapters.filter((c) => c.text.trim().length >= 500);
+  if (!contentChapters.length || !fileTranscripts.length) return [];
+
+  // Pre-build word sets for each chapter — reused for every file lookup
+  const chapterWordSets = contentChapters.map((c) => new Set(tokenizeWords(c.text)));
+
+  const points: SyncPoint[] = [];
+  let cumulativeMs = 0;
+  let lastChapterIdx = contentChapters[0]?.chapterIndex ?? 0;
+
+  for (let fileIdx = 0; fileIdx < fileTranscripts.length; fileIdx++) {
+    const transcript = fileTranscripts[fileIdx];
+    const durationMs = fileDurationsMs[fileIdx] ?? 0;
+
+    if (transcript.trim().length > 0) {
+      const transcriptWords = new Set(tokenizeWords(transcript));
+
+      if (transcriptWords.size > 0) {
+        let bestChapterIdx = lastChapterIdx;
+        let bestScore = -1;
+
+        // Only search chapters at/after the last match to enforce monotonic ordering
+        const startSearchAt = contentChapters.findIndex((c) => c.chapterIndex >= lastChapterIdx);
+        const searchFrom = startSearchAt >= 0 ? startSearchAt : 0;
+
+        for (let ci = searchFrom; ci < contentChapters.length; ci++) {
+          const chWords = chapterWordSets[ci];
+          let hits = 0;
+          for (const w of transcriptWords) {
+            if (chWords.has(w)) hits++;
+          }
+          const score = hits / transcriptWords.size;
+          if (score > bestScore) {
+            bestScore = score;
+            bestChapterIdx = contentChapters[ci].chapterIndex;
+          }
+        }
+
+        if (bestScore >= 0.25) {
+          lastChapterIdx = bestChapterIdx;
+        }
+      }
+    }
+
+    points.push({
+      audioMs: cumulativeMs,
+      fileIndex: fileIdx,
+      fileSeconds: 0, // each point is the start of the file
+      chapterIndex: lastChapterIdx,
+      withinChapterFraction: 0,
+    });
+
+    cumulativeMs += durationMs;
+  }
+
+  return points;
+}
+
 /**
  * Populate fileIndex and fileSeconds on each SyncPoint from cumulative durations.
  * @param fileDurationsMs  Duration (ms) of each audio file in order
