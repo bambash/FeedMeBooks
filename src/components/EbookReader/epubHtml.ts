@@ -382,37 +382,40 @@ export function buildEpubHtml(theme: EpubTheme): string {
       }
 
       /**
-       * Extract text from an ordered array of resolved spine items.
-       * Each item's .index property is used as chapterIndex.
+       * Extract text from an ordered array of { item, label } objects.
+       * item.index is used as chapterIndex; label is included in the output.
+       * For the spine-fallback path, pass { item: spineItem, label: '' }.
        */
-      function extractFromItems(spineItems) {
+      function extractFromItems(entries) {
         var chapters = [];
         var i = 0;
 
         function loadNext() {
-          if (i >= spineItems.length) {
+          if (i >= entries.length) {
             log('extractText done, ' + chapters.length + ' chapters extracted');
             send({ type: 'textExtracted', chapters: chapters });
             return;
           }
-          var spineItem = spineItems[i];
+          var entry = entries[i];
+          var spineItem = entry.item;
+          var label = entry.label || '';
           var chapterIndex = spineItem.index;
           i++;
-          log('extractText loading spineIdx=' + chapterIndex + ' (' + i + '/' + spineItems.length + ')');
+          log('extractText loading spineIdx=' + chapterIndex + ' "' + label + '" (' + i + '/' + entries.length + ')');
 
           var loadPromise;
           try {
             loadPromise = spineItem.load(book.load.bind(book));
           } catch(loadErr) {
             log('extractText item.load() threw: ' + loadErr);
-            chapters.push({ chapterIndex: chapterIndex, text: '' });
+            chapters.push({ chapterIndex: chapterIndex, text: '', label: label });
             loadNext();
             return;
           }
 
           if (!loadPromise || typeof loadPromise.then !== 'function') {
             log('extractText item.load() returned non-promise for spineIdx=' + chapterIndex);
-            chapters.push({ chapterIndex: chapterIndex, text: '' });
+            chapters.push({ chapterIndex: chapterIndex, text: '', label: label });
             loadNext();
             return;
           }
@@ -436,12 +439,12 @@ export function buildEpubHtml(theme: EpubTheme): string {
               log('extractText parse error spineIdx=' + chapterIndex + ': ' + parseErr);
             }
             log('extractText spineIdx=' + chapterIndex + ' text.length=' + text.length);
-            chapters.push({ chapterIndex: chapterIndex, text: text });
+            chapters.push({ chapterIndex: chapterIndex, text: text, label: label });
             try { spineItem.unload(); } catch(e) {}
             loadNext();
           }).catch(function(err) {
             log('extractText spineIdx=' + chapterIndex + ' load failed: ' + err);
-            chapters.push({ chapterIndex: chapterIndex, text: '' });
+            chapters.push({ chapterIndex: chapterIndex, text: '', label: label });
             loadNext();
           });
         }
@@ -450,24 +453,49 @@ export function buildEpubHtml(theme: EpubTheme): string {
       }
 
       // ── 1. Try TOC-based extraction ──────────────────────────────────────
-      var tocSpineItems = [];
+      /**
+       * Labels whose text signals non-narrated back/front matter.
+       * Compared case-insensitively via substring match.
+       */
+      var BACK_MATTER = [
+        'ars arcanum', 'acknowledgment', 'appendix', 'about the author',
+        'index', 'glossary', 'reading group', 'preview', 'excerpt',
+        'also by', 'further reading', 'end notes', 'endnote', 'footnote',
+        'bibliography', 'copyright', 'colophon', 'advertisement',
+      ];
+
+      function isBackMatter(label) {
+        var lower = (label || '').toLowerCase();
+        for (var b = 0; b < BACK_MATTER.length; b++) {
+          if (lower.indexOf(BACK_MATTER[b]) >= 0) return true;
+        }
+        return false;
+      }
+
+      var tocSpineItems = []; // { item, label }
       if (book.navigation && book.navigation.toc && book.navigation.toc.length > 0) {
         var flatToc = getTocLeaves(book.navigation.toc);
-        log('extractAllChapterText: TOC has ' + flatToc.length + ' entries');
+        log('extractAllChapterText: TOC has ' + flatToc.length + ' leaf entries');
         var seenIndices = {};
         for (var t = 0; t < flatToc.length; t++) {
-          var href = flatToc[t].href || '';
+          var tocEntry = flatToc[t];
+          var label = tocEntry.label || '';
+          if (isBackMatter(label)) {
+            log('extractText skipping back matter: "' + label + '"');
+            continue;
+          }
+          var href = tocEntry.href || '';
           var baseHref = href.split('#')[0];
           if (!baseHref) continue;
           var spineItem = book.spine.get(baseHref);
           if (spineItem && !seenIndices[spineItem.index]) {
             seenIndices[spineItem.index] = true;
-            tocSpineItems.push(spineItem);
+            tocSpineItems.push({ item: spineItem, label: label });
           }
         }
         // Sort by spine order so proportional mapping is monotone
-        tocSpineItems.sort(function(a, b) { return a.index - b.index; });
-        log('extractAllChapterText: ' + tocSpineItems.length + ' unique spine items from TOC');
+        tocSpineItems.sort(function(a, b) { return a.item.index - b.item.index; });
+        log('extractAllChapterText: ' + tocSpineItems.length + ' narrated spine items from TOC');
       }
 
       if (tocSpineItems.length > 0) {
@@ -479,7 +507,7 @@ export function buildEpubHtml(theme: EpubTheme): string {
       log('extractAllChapterText: no TOC, using full spine (' + book.spine.items.length + ' items)');
       var allItems = [];
       for (var si = 0; si < book.spine.items.length; si++) {
-        allItems.push(book.spine.get(si));
+        allItems.push({ item: book.spine.get(si), label: '' });
       }
       extractFromItems(allItems);
     }

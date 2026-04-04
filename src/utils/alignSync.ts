@@ -24,6 +24,8 @@ export interface ChapterText {
   chapterIndex: number;
   /** Full plain text of the chapter (whitespace-normalised) */
   text: string;
+  /** TOC label (chapter title) — used for logging and back-matter detection */
+  label?: string;
 }
 
 // ─── Core alignment ──────────────────────────────────────────────────────────

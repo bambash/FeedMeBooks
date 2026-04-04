@@ -152,7 +152,12 @@ export default function ReaderScreen() {
       chaptersRef.current = chapters;
       const b = bookRef.current;
       const substantiveChapters = chapters.filter((c) => c.text.trim().length >= 500);
-      handleLog(`[index] epub extracted ${chapters.length} chapters (${substantiveChapters.length} with content ≥500 chars)`);
+      handleLog(
+        `[index] epub extracted ${chapters.length} chapters (${substantiveChapters.length} with content ≥500 chars)` +
+        (chapters[0]?.label != null
+          ? ': ' + substantiveChapters.map((c) => c.label || `spine${c.chapterIndex}`).join(', ')
+          : ''),
+      );
       if (!b?.audioUris?.length || !chapters.length) {
         const err = 'No audio or ebook content found';
         handleLog(`[index] error: ${err}`);
