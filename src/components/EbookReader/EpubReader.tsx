@@ -170,7 +170,7 @@ export default function EpubReader({
         if (data.type === 'ready') {
           setLoading(false);
         } else if (data.type === 'locationChanged') {
-          onPositionChange({ cfi: data.cfi, percentage: data.percentage });
+          onPositionChange({ cfi: data.cfi, percentage: data.percentage, spineIndex: data.spineIndex ?? -1 });
         } else if (data.type === 'textExtracted') {
           onTextExtractedRef.current?.(data.chapters ?? []);
         } else if (data.type === 'log') {

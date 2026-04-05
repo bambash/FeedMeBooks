@@ -224,8 +224,10 @@ export function buildEpubHtml(theme: EpubTheme): string {
             var loc = rendition.currentLocation();
             if (loc && loc.start && loc.start.cfi) {
               var pct = book.locations.percentageFromCfi(loc.start.cfi);
-              log('post-generate pct update: ' + pct);
-              send({ type: 'locationChanged', cfi: loc.start.cfi, percentage: pct });
+              var postSpineIdx = -1;
+              try { var pi = book.spine.get(loc.start.href); if (pi) postSpineIdx = pi.index; } catch(e) {}
+              log('post-generate pct update: ' + pct + ' spineIdx=' + postSpineIdx);
+              send({ type: 'locationChanged', cfi: loc.start.cfi, percentage: pct, spineIndex: postSpineIdx });
             }
           }).catch(function(err) {
             log('locations.generate() error: ' + (err && err.message ? err.message : String(err)));
@@ -235,11 +237,17 @@ export function buildEpubHtml(theme: EpubTheme): string {
         });
 
         rendition.on('relocated', function(location) {
-          log('relocated cfi=' + location.start.cfi + ' pct=' + (location.start.percentage || 0));
+          var spineIdx = -1;
+          try {
+            var currentItem = book.spine.get(location.start.href);
+            if (currentItem) spineIdx = currentItem.index;
+          } catch(e) {}
+          log('relocated cfi=' + location.start.cfi + ' pct=' + (location.start.percentage || 0) + ' spineIdx=' + spineIdx);
           send({
             type: 'locationChanged',
             cfi: location.start.cfi,
             percentage: location.start.percentage || 0,
+            spineIndex: spineIdx,
           });
         });
 

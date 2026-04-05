@@ -17,7 +17,7 @@ import EbookReader from '../../src/components/EbookReader';
 import { useLibraryStore } from '../../src/store/libraryStore';
 import { colors, radius, spacing, typography } from '../../src/theme';
 import type { EbookPosition, ReaderMode, SyncMap } from '../../src/types';
-import { buildSyncPoints, buildSyncPointsFromTranscripts, fillFilePositions, findChapterByWindowText, lookupByAudio, type ChapterText } from '../../src/utils/alignSync';
+import { buildSyncPoints, buildSyncPointsFromTranscripts, fillFilePositions, findChapterByWindowText, lookupByAudio, lookupByChapter, type ChapterText } from '../../src/utils/alignSync';
 import { downloadModel, isModelDownloaded, releaseWhisperContext, transcribeFile, transcribeWindow } from '../../src/utils/transcribeAudio';
 import { deleteSyncMap, loadSyncMap, saveSyncMap } from '../../src/utils/syncMapStorage';
 import { deleteTranscriptionCache, loadCachedFileSegments, loadCacheMeta, saveFileSegments } from '../../src/utils/transcriptionCache';
@@ -364,23 +364,42 @@ export default function ReaderScreen() {
             setSyncBanner({ targetMode: 'ebook', percentage: pct });
           }
         } else if (mode === 'ebook' && next === 'audio' && totalDuration > 0) {
-          // Compute ebook percentage → offer jump in audiobook
           const pct = b.session.ebookPosition.percentage;
+          const spineIndex = b.session.ebookPosition.spineIndex ?? -1;
           if (pct > 0.01) {
-            const targetElapsed = pct * totalDuration;
-            let cumulative = 0;
-            let targetFileIndex = durations.length - 1;
-            let targetSeconds = durations[durations.length - 1] ?? 0;
-            for (let i = 0; i < durations.length; i++) {
-              const d = durations[i] ?? 0;
-              if (cumulative + d >= targetElapsed) {
-                targetFileIndex = i;
-                targetSeconds = targetElapsed - cumulative;
-                break;
+            const currentMap = syncMap;
+            // Prefer sync-map lookup by spine/chapter index (accurate)
+            if (currentMap?.points.length && spineIndex >= 0) {
+              const pt = lookupByChapter(currentMap.points, spineIndex);
+              handleLog(`[sync] ebook→audio: spineIdx=${spineIndex} → fileIdx=${pt?.fileIndex ?? 'null'} fileSeconds=${pt?.fileSeconds?.toFixed(1) ?? 'null'}`);
+              if (pt) {
+                setSyncBanner({
+                  targetMode: 'audio',
+                  percentage: pct,
+                  targetFileIndex: pt.fileIndex,
+                  targetSeconds: pt.fileSeconds,
+                });
+              } else {
+                setSyncBanner({ targetMode: 'audio', percentage: pct });
               }
-              cumulative += d;
+            } else {
+              // Fallback: percentage × total duration (no sync map or no spine info yet)
+              handleLog(`[sync] ebook→audio: no sync map or spineIndex, using pct=${pct.toFixed(3)}`);
+              const targetElapsed = pct * totalDuration;
+              let cumulative = 0;
+              let targetFileIndex = durations.length - 1;
+              let targetSeconds = durations[durations.length - 1] ?? 0;
+              for (let i = 0; i < durations.length; i++) {
+                const d = durations[i] ?? 0;
+                if (cumulative + d >= targetElapsed) {
+                  targetFileIndex = i;
+                  targetSeconds = targetElapsed - cumulative;
+                  break;
+                }
+                cumulative += d;
+              }
+              setSyncBanner({ targetMode: 'audio', percentage: pct, targetFileIndex, targetSeconds });
             }
-            setSyncBanner({ targetMode: 'audio', percentage: pct, targetFileIndex, targetSeconds });
           }
         }
       }
