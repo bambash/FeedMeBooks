@@ -94,13 +94,18 @@ const tokenizeWords = (t: string): string[] => t.toLowerCase().match(/\b[a-z']{2
  *
  * Algorithm:
  *  - Pre-build a word-set for every chapter (O(Σ chapter text))
- *  - For each audio file, compute recall = |transcript ∩ chapter| / |transcript|
- *    for every chapter at or after the last matched chapter (monotonic)
- *  - Assign the highest-scoring chapter to that file
- *  - If no chapter exceeds the 0.25 recall threshold, keep the last assignment
+ *  - For each audio file, use audio position to estimate which chapter ordinal
+ *    we should be near (proportional bounding), then score every chapter within
+ *    ±30% (min ±3) of that estimate using vocab recall
+ *  - Assign the highest-scoring chapter; enforce monotonic ordering so the
+ *    chapter index can never go backward
+ *  - If no chapter exceeds the recall threshold, keep the last assignment
+ *
+ * The proportional bound prevents early/common chapters from "winning" for
+ * files deep into the audiobook, while vocabulary matching provides precision
+ * within that window.
  *
  * Returns one SyncPoint per audio file (at the file's start position).
- * fileIndex and fileSeconds are already populated — fillFilePositions is not needed.
  */
 export function buildSyncPointsFromTranscripts(
   fileTranscripts: string[],
@@ -113,9 +118,14 @@ export function buildSyncPointsFromTranscripts(
   // Pre-build word sets for each chapter — reused for every file lookup
   const chapterWordSets = contentChapters.map((c) => new Set(tokenizeWords(c.text)));
 
+  const n = contentChapters.length;
+  const totalAudioMs = fileDurationsMs.reduce((s, d) => s + (d ?? 0), 0);
+  // Half-window: ±30% of chapter count, but never less than 3 either side
+  const halfWindow = Math.max(3, Math.ceil(n * 0.3));
+
   const points: SyncPoint[] = [];
   let cumulativeMs = 0;
-  let lastChapterIdx = contentChapters[0]?.chapterIndex ?? 0;
+  let lastOrdinal = 0; // ordinal position in contentChapters array (monotonic)
 
   for (let fileIdx = 0; fileIdx < fileTranscripts.length; fileIdx++) {
     const transcript = fileTranscripts[fileIdx];
@@ -125,14 +135,18 @@ export function buildSyncPointsFromTranscripts(
       const transcriptWords = new Set(tokenizeWords(transcript));
 
       if (transcriptWords.size > 0) {
-        let bestChapterIdx = lastChapterIdx;
+        // Proportional estimate of where we should be in the chapter list
+        const audioPct = totalAudioMs > 0 ? cumulativeMs / totalAudioMs : 0;
+        const expectedOrdinal = Math.round(audioPct * n);
+
+        // Search range: at/after lastOrdinal AND within ±halfWindow of expected
+        const searchLo = Math.max(lastOrdinal, Math.max(0, expectedOrdinal - halfWindow));
+        const searchHi = Math.min(n - 1, expectedOrdinal + halfWindow);
+
+        let bestOrdinal = lastOrdinal;
         let bestScore = -1;
 
-        // Only search chapters at/after the last match to enforce monotonic ordering
-        const startSearchAt = contentChapters.findIndex((c) => c.chapterIndex >= lastChapterIdx);
-        const searchFrom = startSearchAt >= 0 ? startSearchAt : 0;
-
-        for (let ci = searchFrom; ci < contentChapters.length; ci++) {
+        for (let ci = searchLo; ci <= searchHi; ci++) {
           const chWords = chapterWordSets[ci];
           let hits = 0;
           for (const w of transcriptWords) {
@@ -141,12 +155,12 @@ export function buildSyncPointsFromTranscripts(
           const score = hits / transcriptWords.size;
           if (score > bestScore) {
             bestScore = score;
-            bestChapterIdx = contentChapters[ci].chapterIndex;
+            bestOrdinal = ci;
           }
         }
 
-        if (bestScore >= 0.25) {
-          lastChapterIdx = bestChapterIdx;
+        if (bestScore >= 0.2) {
+          lastOrdinal = bestOrdinal;
         }
       }
     }
@@ -154,8 +168,8 @@ export function buildSyncPointsFromTranscripts(
     points.push({
       audioMs: cumulativeMs,
       fileIndex: fileIdx,
-      fileSeconds: 0, // each point is the start of the file
-      chapterIndex: lastChapterIdx,
+      fileSeconds: 0,
+      chapterIndex: contentChapters[lastOrdinal].chapterIndex,
       withinChapterFraction: 0,
     });
 

@@ -333,32 +333,37 @@ export default function ReaderScreen() {
             if (pt) {
               setSyncBanner({ targetMode: 'ebook', percentage: pct, targetChapterIndex: pt.chapterIndex });
 
-              // Kick off a JIT 15-second window scan in the background to refine the estimate.
-              // We capture everything we need now; the async result updates the banner when ready.
-              const audioUri = b.audioUris?.[b.session.audioFileIndex];
+              // JIT refine: use the cached transcript segments for the current file
+              // to extract text near the current playback position, then match against
+              // chapter texts.  This avoids re-transcribing the audio (which can fail
+              // for some formats) and is instant since the segments are already cached.
               const posMs = b.session.audioPosition * 1000;
-              const offsetMs = Math.max(0, posMs - 7500); // centre the 15s window on current pos
+              const windowStartMs = Math.max(0, posMs - 7500);
+              const windowEndMs = posMs + 7500;
+              const fileIdx = b.session.audioFileIndex;
               const bookId = b.id;
-              if (audioUri) {
-                isModelDownloaded()
-                  .then((hasModel) => {
-                    if (!hasModel) return;
-                    return loadChapterTexts(bookId).then((chapterTexts) => {
-                      if (!chapterTexts?.length) return;
-                      handleLog(`[sync] JIT scan: file=${b.session.audioFileIndex} offsetMs=${offsetMs}`);
-                      return transcribeWindow(audioUri, offsetMs).then((windowText) => {
-                        const jitChapter = findChapterByWindowText(windowText, chapterTexts);
-                        handleLog(`[sync] JIT result: "${windowText.slice(0, 60)}…" → ch=${jitChapter ?? 'no match'}`);
-                        if (jitChapter != null) {
-                          setSyncBanner((prev) =>
-                            prev ? { ...prev, targetChapterIndex: jitChapter } : prev,
-                          );
-                        }
-                      });
-                    });
-                  })
-                  .catch((err) => handleLog(`[sync] JIT scan error: ${err}`));
-              }
+              loadCachedFileSegments(bookId, fileIdx)
+                .then((cachedSegs) => {
+                  if (!cachedSegs?.length) return;
+                  // Extract segments that overlap the ±7.5s window around current position
+                  const windowText = cachedSegs
+                    .filter((s) => s.t1Ms >= windowStartMs && s.t0Ms <= windowEndMs)
+                    .map((s) => s.text)
+                    .join(' ')
+                    .trim();
+                  if (!windowText) return;
+                  return loadChapterTexts(bookId).then((chapterTexts) => {
+                    if (!chapterTexts?.length) return;
+                    const jitChapter = findChapterByWindowText(windowText, chapterTexts);
+                    handleLog(`[sync] JIT result: "${windowText.slice(0, 60)}…" → ch=${jitChapter ?? 'no match'}`);
+                    if (jitChapter != null) {
+                      setSyncBanner((prev) =>
+                        prev ? { ...prev, targetChapterIndex: jitChapter } : prev,
+                      );
+                    }
+                  });
+                })
+                .catch((err) => handleLog(`[sync] JIT scan error: ${err}`));
             }
           } else if (pct > 0.01) {
             setSyncBanner({ targetMode: 'ebook', percentage: pct });
