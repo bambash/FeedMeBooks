@@ -14,11 +14,15 @@
  *     { type: 'extractText' }                         // extract all chapter texts for sync indexing
  *     { type: 'setTheme', theme: ThemeData }
  *     { type: 'setFontSize', size: number }
+ *     { type: 'startAutoScroll', speed?: number }     // px/s, default 50
+ *     { type: 'stopAutoScroll' }
+ *     { type: 'setAutoScrollSpeed', speed: number }
  *
  *   WebView → RN (postMessage via ReactNativeWebView):
  *     { type: 'ready' }
  *     { type: 'locationChanged', cfi: string, percentage: number }
  *     { type: 'textExtracted', chapters: Array<{chapterIndex: number, text: string}> }
+ *     { type: 'autoScrollEnd' }                       // reached end of book
  *     { type: 'error', message: string }
  */
 
@@ -46,26 +50,8 @@ export function buildEpubHtml(theme: EpubTheme): string {
     #viewer {
       width: 100%;
       height: 100%;
-    }
-    .nav-zone {
-      position: fixed;
-      top: 0; bottom: 0;
-      width: 38%;
-      z-index: 5;
-      display: flex;
-      align-items: center;
-      opacity: 0;
-      transition: opacity 0.15s;
-      pointer-events: none;
-    }
-    .nav-zone.active { opacity: 1; }
-    .nav-prev { left: 0; justify-content: flex-start; padding-left: 12px; }
-    .nav-next { right: 0; justify-content: flex-end; padding-right: 12px; }
-    .nav-arrow {
-      font-size: 28px;
-      color: rgba(255,255,255,0.55);
-      text-shadow: 0 0 8px rgba(0,0,0,0.8);
-      user-select: none;
+      overflow-y: auto;
+      -webkit-overflow-scrolling: touch;
     }
     #error {
       display: none;
@@ -102,8 +88,6 @@ export function buildEpubHtml(theme: EpubTheme): string {
   <div id="loading"><div class="spinner"></div></div>
   <div id="viewer"></div>
   <div id="error"></div>
-  <div class="nav-zone nav-prev" id="navPrev"><span class="nav-arrow">‹</span></div>
-  <div class="nav-zone nav-next" id="navNext"><span class="nav-arrow">›</span></div>
 
   <script>
     var book = null;
@@ -111,6 +95,83 @@ export function buildEpubHtml(theme: EpubTheme): string {
     var pendingCfi = null;
     var locationsReady = false;
     var pendingPercentage = null;
+
+    // ── Auto-scroll state ────────────────────────────────────────────────────
+    var asActive = false;      // running
+    var asSpeed  = 50;         // px / second
+    var asRAF    = null;       // requestAnimationFrame handle
+    var asLastTs = null;       // previous frame timestamp (ms)
+    var asPaused = false;      // touch-paused
+
+    /**
+     * Return the best scrollable element for the current epub.js rendering.
+     * In scrolled-doc mode epub.js puts content in an iframe; we prefer the
+     * iframe's inner scroll root over the outer #viewer div.
+     */
+    function getScrollEl() {
+      var viewer = document.getElementById('viewer');
+      if (!viewer) return null;
+      // Try iframe inner document first (scrolled-doc mode)
+      var iframe = viewer.querySelector('iframe');
+      if (iframe) {
+        try {
+          var doc = iframe.contentDocument || (iframe.contentWindow && iframe.contentWindow.document);
+          if (doc) {
+            var inner = doc.scrollingElement || doc.documentElement || doc.body;
+            if (inner && inner.scrollHeight > inner.clientHeight + 2) return inner;
+          }
+        } catch(e) {}
+      }
+      // Fallback: outer viewer div (paginated mode or unknown layout)
+      return viewer;
+    }
+
+    function asAdvanceChapter() {
+      asActive = false;
+      if (asRAF) { cancelAnimationFrame(asRAF); asRAF = null; }
+      if (!rendition) return;
+      rendition.next().then(function() {
+        var el = getScrollEl();
+        if (el) el.scrollTop = 0;
+        asActive = true;
+        asLastTs = null;
+        asRAF = requestAnimationFrame(asTick);
+      }).catch(function() {
+        // End of book
+        asActive = false;
+        send({ type: 'autoScrollEnd' });
+      });
+    }
+
+    function asTick(ts) {
+      if (!asActive) return;
+      asRAF = requestAnimationFrame(asTick);
+      if (asPaused || asLastTs === null) { asLastTs = ts; return; }
+      var dt = Math.min((ts - asLastTs) / 1000, 0.05); // cap at 50 ms
+      asLastTs = ts;
+      var el = getScrollEl();
+      if (!el) return;
+      el.scrollTop += asSpeed * dt;
+      // At the bottom? Advance to next chapter.
+      if (el.scrollHeight - el.scrollTop - el.clientHeight < 4) {
+        asAdvanceChapter();
+      }
+    }
+
+    function startAutoScroll(speed) {
+      if (speed != null) asSpeed = speed;
+      asActive = true;
+      asPaused = false;
+      asLastTs = null;
+      if (!asRAF) asRAF = requestAnimationFrame(asTick);
+    }
+
+    function stopAutoScroll() {
+      asActive = false;
+      asPaused = false;
+      if (asRAF) { cancelAnimationFrame(asRAF); asRAF = null; }
+      asLastTs = null;
+    }
 
     /**
      * Navigate to a fractional position (0–1).
@@ -197,7 +258,7 @@ export function buildEpubHtml(theme: EpubTheme): string {
         rendition = book.renderTo('viewer', {
           width: window.innerWidth,
           height: window.innerHeight,
-          flow: 'paginated',
+          flow: 'scrolled-doc',
           spread: 'none',
           minSpreadWidth: 9999,
         });
@@ -256,51 +317,27 @@ export function buildEpubHtml(theme: EpubTheme): string {
       }
     }
 
-    // Tap zones: right 40% → next, left 40% → prev, middle 20% → ignored
-    // Also handle swipe for users who prefer it
+    // Touch: pause auto-scroll while finger is on screen; horizontal swipe = chapter nav.
+    // Tap zones are removed — in scrolled-doc mode the reader scrolls naturally.
     var touchStartX = 0;
     var touchStartY = 0;
-    var touchMoved = false;
     document.addEventListener('touchstart', function(e) {
       touchStartX = e.touches[0].clientX;
       touchStartY = e.touches[0].clientY;
-      touchMoved = false;
-    }, { passive: true });
-    document.addEventListener('touchmove', function(e) {
-      var dx = Math.abs(e.touches[0].clientX - touchStartX);
-      var dy = Math.abs(e.touches[0].clientY - touchStartY);
-      if (dx > 10 || dy > 10) touchMoved = true;
+      if (asActive) asPaused = true; // freeze auto-scroll while touching
     }, { passive: true });
     document.addEventListener('touchend', function(e) {
+      asPaused = false; // resume auto-scroll (if still active)
       var endX = e.changedTouches[0].clientX;
       var dx = endX - touchStartX;
       var dy = e.changedTouches[0].clientY - touchStartY;
       if (!rendition) return;
-      // Horizontal swipe (more horizontal than vertical, >50px)
+      // Horizontal swipe only → chapter navigation
       if (Math.abs(dx) > 50 && Math.abs(dx) > Math.abs(dy) * 1.5) {
-        if (dx < 0) rendition.next();
-        else        rendition.prev();
-        return;
-      }
-      // Tap (no significant movement)
-      if (!touchMoved) {
-        var w = window.innerWidth;
-        if (endX > w * 0.6) {
-          flashZone('navNext');
-          rendition.next();
-        } else if (endX < w * 0.4) {
-          flashZone('navPrev');
-          rendition.prev();
-        }
+        if (dx < 0) { stopAutoScroll(); rendition.next(); }
+        else        { stopAutoScroll(); rendition.prev(); }
       }
     }, { passive: true });
-
-    function flashZone(id) {
-      var el = document.getElementById(id);
-      if (!el) return;
-      el.classList.add('active');
-      setTimeout(function() { el.classList.remove('active'); }, 200);
-    }
 
     // Keyboard navigation
     document.addEventListener('keydown', function(e) {
@@ -352,6 +389,15 @@ export function buildEpubHtml(theme: EpubTheme): string {
             break;
           case 'extractText':
             extractAllChapterText();
+            break;
+          case 'startAutoScroll':
+            startAutoScroll(data.speed != null ? Number(data.speed) : null);
+            break;
+          case 'stopAutoScroll':
+            stopAutoScroll();
+            break;
+          case 'setAutoScrollSpeed':
+            asSpeed = Number(data.speed) || asSpeed;
             break;
         }
       } catch(e) { log('handleMessage error: ' + e); }

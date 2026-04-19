@@ -67,6 +67,8 @@ export default function ReaderScreen() {
   const [devMode, setDevMode] = useState(false);
   const [logs, setLogs] = useState<string[]>([]);
   const [showLogViewer, setShowLogViewer] = useState(false);
+  const [autoScrollActive, setAutoScrollActive] = useState(false);
+  const [scrollSpeed, setScrollSpeed] = useState(50); // px/s
   const logsRef = useRef<string[]>([]);
 
   // Sync map (word-level audio↔ebook alignment)
@@ -450,6 +452,7 @@ export default function ReaderScreen() {
       if (mode === 'ebook') {
         setEpubTargetPercentage(null);
         setEpubTargetChapter(null);
+        setAutoScrollActive(false);
       }
 
       Animated.sequence([
@@ -497,6 +500,10 @@ export default function ReaderScreen() {
     },
     [book, updateAudioFileDuration],
   );
+
+  const handleAutoScrollEnd = useCallback(() => {
+    setAutoScrollActive(false);
+  }, []);
 
   const copyLogs = useCallback(async () => {
     const text = logsRef.current.join('\n') || '(no logs yet)';
@@ -619,8 +626,42 @@ export default function ReaderScreen() {
               targetChapter={epubTargetChapter}
               textExtractRequest={textExtractRequest}
               onTextExtracted={handleTextExtracted}
+              autoScroll={autoScrollActive}
+              scrollSpeed={scrollSpeed}
+              onAutoScrollEnd={handleAutoScrollEnd}
               onLog={devMode ? handleLog : undefined}
             />
+            {/* Floating auto-scroll control — bottom-right of the reader */}
+            <View style={styles.autoScrollBar} pointerEvents="box-none">
+              {autoScrollActive && (
+                <>
+                  <Pressable
+                    style={[styles.autoScrollSpeedBtn, scrollSpeed === 30 && styles.autoScrollSpeedBtnActive]}
+                    onPress={() => setScrollSpeed(30)}
+                  >
+                    <Text style={styles.autoScrollSpeedText}>S</Text>
+                  </Pressable>
+                  <Pressable
+                    style={[styles.autoScrollSpeedBtn, scrollSpeed === 50 && styles.autoScrollSpeedBtnActive]}
+                    onPress={() => setScrollSpeed(50)}
+                  >
+                    <Text style={styles.autoScrollSpeedText}>M</Text>
+                  </Pressable>
+                  <Pressable
+                    style={[styles.autoScrollSpeedBtn, scrollSpeed === 90 && styles.autoScrollSpeedBtnActive]}
+                    onPress={() => setScrollSpeed(90)}
+                  >
+                    <Text style={styles.autoScrollSpeedText}>F</Text>
+                  </Pressable>
+                </>
+              )}
+              <Pressable
+                style={[styles.autoScrollBtn, autoScrollActive && styles.autoScrollBtnActive]}
+                onPress={() => setAutoScrollActive((v) => !v)}
+              >
+                <Text style={styles.autoScrollIcon}>{autoScrollActive ? '⏸' : '▶'}</Text>
+              </Pressable>
+            </View>
             {/* Compact audio strip while reading — if audio exists */}
             {canAudio && (
               <AudioPlayer
@@ -1007,6 +1048,7 @@ const styles = StyleSheet.create({
   },
   content: {
     flex: 1,
+    position: 'relative',
   },
   syncBanner: {
     flexDirection: 'row',
@@ -1046,6 +1088,51 @@ const styles = StyleSheet.create({
   syncDismissText: {
     ...typography.small,
     color: colors.textMuted,
+  },
+  autoScrollBar: {
+    position: 'absolute',
+    right: spacing.md,
+    bottom: spacing.lg,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.xs,
+    zIndex: 20,
+  },
+  autoScrollBtn: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: 'rgba(30,20,50,0.75)',
+    borderWidth: 1,
+    borderColor: colors.border,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  autoScrollBtnActive: {
+    backgroundColor: colors.primary,
+    borderColor: colors.primary,
+  },
+  autoScrollIcon: {
+    fontSize: 18,
+    color: colors.white,
+  },
+  autoScrollSpeedBtn: {
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    backgroundColor: 'rgba(30,20,50,0.75)',
+    borderWidth: 1,
+    borderColor: colors.border,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  autoScrollSpeedBtnActive: {
+    borderColor: colors.primaryLight,
+  },
+  autoScrollSpeedText: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: colors.text,
   },
 });
 

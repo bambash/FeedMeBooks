@@ -1,6 +1,6 @@
 import * as FileSystem from 'expo-file-system';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, StyleSheet, View } from 'react-native';
 import WebView, { type WebViewMessageEvent } from 'react-native-webview';
 import { colors } from '../../theme';
 import type { EbookPosition } from '../../types';
@@ -23,6 +23,12 @@ interface Props {
   textExtractRequest?: number;
   /** Receives chapter texts extracted from the epub (response to textExtractRequest) */
   onTextExtracted?: (chapters: { chapterIndex: number; text: string }[]) => void;
+  /** When true the WebView will auto-scroll at scrollSpeed px/s */
+  autoScroll?: boolean;
+  /** Auto-scroll speed in pixels per second (default 50) */
+  scrollSpeed?: number;
+  /** Called when auto-scroll reaches the last chapter */
+  onAutoScrollEnd?: () => void;
   /** Dev-mode log sink — receives timestamped messages from both RN and WebView layers */
   onLog?: (message: string) => void;
 }
@@ -37,6 +43,9 @@ export default function EpubReader({
   targetChapter,
   textExtractRequest = 0,
   onTextExtracted,
+  autoScroll = false,
+  scrollSpeed = 50,
+  onAutoScrollEnd,
   onLog,
 }: Props) {
   const webViewRef = useRef<WebView>(null);
@@ -56,6 +65,8 @@ export default function EpubReader({
   onLogRef.current = onLog;
   const onTextExtractedRef = useRef(onTextExtracted);
   onTextExtractedRef.current = onTextExtracted;
+  const onAutoScrollEndRef = useRef(onAutoScrollEnd);
+  onAutoScrollEndRef.current = onAutoScrollEnd;
   // Track last sent targetChapter to avoid duplicates
   const sentChapterRef = useRef<number | null>(null);
 
@@ -149,6 +160,23 @@ export default function EpubReader({
     }
   }, [textExtractRequest]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Start / stop auto-scroll in the WebView when the prop changes
+  useEffect(() => {
+    if (!webViewReadyRef.current || loading) return;
+    if (autoScroll) {
+      sendToWebView({ type: 'startAutoScroll', speed: scrollSpeed });
+    } else {
+      sendToWebView({ type: 'stopAutoScroll' });
+    }
+  }, [autoScroll, scrollSpeed, loading, sendToWebView]);
+
+  // Update speed only (no start/stop) when speed changes while already scrolling
+  useEffect(() => {
+    if (autoScroll && webViewReadyRef.current && !loading) {
+      sendToWebView({ type: 'setAutoScrollSpeed', speed: scrollSpeed });
+    }
+  }, [scrollSpeed]); // eslint-disable-line react-hooks/exhaustive-deps
+
   // Navigate to a percentage position when targetPercentage changes
   useEffect(() => {
     rnLog('targetPercentage effect pct=' + targetPercentage + ' webViewReady=' + webViewReadyRef.current + ' alreadySent=' + (targetPercentage === sentPercentageRef.current));
@@ -173,6 +201,8 @@ export default function EpubReader({
           onPositionChange({ cfi: data.cfi, percentage: data.percentage, spineIndex: data.spineIndex ?? -1 });
         } else if (data.type === 'textExtracted') {
           onTextExtractedRef.current?.(data.chapters ?? []);
+        } else if (data.type === 'autoScrollEnd') {
+          onAutoScrollEndRef.current?.();
         } else if (data.type === 'log') {
           onLogRef.current?.(data.message);
         }
@@ -182,9 +212,6 @@ export default function EpubReader({
   );
 
   const htmlContent = buildEpubHtml(theme);
-
-  const goNext = useCallback(() => sendToWebView({ type: 'next' }), [sendToWebView]);
-  const goPrev = useCallback(() => sendToWebView({ type: 'prev' }), [sendToWebView]);
 
   return (
     <View style={styles.container}>
@@ -207,25 +234,6 @@ export default function EpubReader({
         allowUniversalAccessFromFileURLs
         mixedContentMode="always"
       />
-      {/* React Native overlay nav buttons — more reliable than WebView touch events */}
-      {!loading && (
-        <>
-          <Pressable
-            style={({ pressed }) => [styles.navBtn, styles.navPrev, pressed && styles.navBtnActive]}
-            onPress={goPrev}
-            hitSlop={8}
-          >
-            <Text style={styles.navArrow}>‹</Text>
-          </Pressable>
-          <Pressable
-            style={({ pressed }) => [styles.navBtn, styles.navNext, pressed && styles.navBtnActive]}
-            onPress={goNext}
-            hitSlop={8}
-          >
-            <Text style={styles.navArrow}>›</Text>
-          </Pressable>
-        </>
-      )}
     </View>
   );
 }
@@ -245,27 +253,5 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     backgroundColor: colors.bg,
     zIndex: 10,
-  },
-  navBtn: {
-    position: 'absolute',
-    top: 0,
-    bottom: 0,
-    width: 44,
-    alignItems: 'center',
-    justifyContent: 'center',
-    zIndex: 5,
-    opacity: 0.35,
-  },
-  navBtnActive: {
-    opacity: 0.85,
-    backgroundColor: 'rgba(124,58,237,0.12)',
-  },
-  navPrev: { left: 0 },
-  navNext: { right: 0 },
-  navArrow: {
-    fontSize: 36,
-    color: colors.text,
-    fontWeight: '300',
-    lineHeight: 40,
   },
 });
