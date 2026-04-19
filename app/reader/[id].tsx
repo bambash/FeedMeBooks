@@ -409,7 +409,9 @@ export default function ReaderScreen() {
         } else if (mode === 'ebook' && next === 'audio' && totalDuration > 0) {
           const pct = b.session.ebookPosition.percentage;
           const spineIndex = b.session.ebookPosition.spineIndex ?? -1;
-          if (pct > 0.01) {
+          // Allow sync when we have a valid spine index even if pct is 0
+          // (scrolled-doc mode may report pct=0 until locations are generated)
+          if (spineIndex >= 0 || pct > 0.01) {
             const currentMap = syncMap;
             // Prefer sync-map lookup by spine/chapter index (accurate)
             if (currentMap?.points.length && spineIndex >= 0) {

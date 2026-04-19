@@ -303,11 +303,20 @@ export function buildEpubHtml(theme: EpubTheme): string {
             var currentItem = book.spine.get(location.start.href);
             if (currentItem) spineIdx = currentItem.index;
           } catch(e) {}
-          log('relocated cfi=' + location.start.cfi + ' pct=' + (location.start.percentage || 0) + ' spineIdx=' + spineIdx);
+          // In scrolled-doc mode location.start.percentage is always 0.
+          // Use book.locations.percentageFromCfi when locations are ready.
+          var pct = location.start.percentage || 0;
+          if (locationsReady && location.start.cfi) {
+            try {
+              var computed = book.locations.percentageFromCfi(location.start.cfi);
+              if (computed != null && computed >= 0) pct = computed;
+            } catch(e) {}
+          }
+          log('relocated cfi=' + location.start.cfi + ' pct=' + pct + ' spineIdx=' + spineIdx);
           send({
             type: 'locationChanged',
             cfi: location.start.cfi,
-            percentage: location.start.percentage || 0,
+            percentage: pct,
             spineIndex: spineIdx,
           });
         });
