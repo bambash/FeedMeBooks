@@ -17,6 +17,9 @@ interface Props {
   targetChapter?: number | null;
   textExtractRequest?: number;
   onTextExtracted?: (chapters: { chapterIndex: number; text: string }[]) => void;
+  autoScroll?: boolean;
+  scrollSpeed?: number;
+  onAutoScrollEnd?: () => void;
   onLog?: (message: string) => void;
 }
 
@@ -31,6 +34,9 @@ export default function EbookReader({
   targetChapter,
   textExtractRequest,
   onTextExtracted,
+  autoScroll,
+  scrollSpeed,
+  onAutoScrollEnd,
   onLog,
 }: Props) {
   switch (format) {
@@ -46,6 +52,9 @@ export default function EbookReader({
           targetChapter={targetChapter}
           textExtractRequest={textExtractRequest}
           onTextExtracted={onTextExtracted}
+          autoScroll={autoScroll}
+          scrollSpeed={scrollSpeed}
+          onAutoScrollEnd={onAutoScrollEnd}
           onLog={onLog}
         />
       );
