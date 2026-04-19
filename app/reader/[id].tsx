@@ -416,13 +416,29 @@ export default function ReaderScreen() {
             // Prefer sync-map lookup by spine/chapter index (accurate)
             if (currentMap?.points.length && spineIndex >= 0) {
               const pt = lookupByChapter(currentMap.points, spineIndex);
-              handleLog(`[sync] ebook→audio: spineIdx=${spineIndex} → fileIdx=${pt?.fileIndex ?? 'null'} fileSeconds=${pt?.fileSeconds?.toFixed(1) ?? 'null'}`);
               if (pt) {
+                // Re-derive file position from pt.audioMs using the session's actual
+                // file durations rather than the pre-computed fileIndex/fileSeconds stored
+                // in the sync map (those were computed from whisper timestamps which can
+                // be truncated for long mp4 files, producing badly wrong file positions).
+                let targetFileIndex = durations.length - 1;
+                let targetSeconds = durations[durations.length - 1] ?? 0;
+                let cum = 0;
+                for (let i = 0; i < durations.length; i++) {
+                  const d = (durations[i] ?? 0) * 1000;
+                  if (cum + d > pt.audioMs) {
+                    targetFileIndex = i;
+                    targetSeconds = (pt.audioMs - cum) / 1000;
+                    break;
+                  }
+                  cum += d;
+                }
+                handleLog(`[sync] ebook→audio: spineIdx=${spineIndex} audioMs=${pt.audioMs} → fileIdx=${targetFileIndex} fileSeconds=${targetSeconds.toFixed(1)}`);
                 setSyncBanner({
                   targetMode: 'audio',
                   percentage: pct,
-                  targetFileIndex: pt.fileIndex,
-                  targetSeconds: pt.fileSeconds,
+                  targetFileIndex,
+                  targetSeconds,
                 });
               } else {
                 setSyncBanner({ targetMode: 'audio', percentage: pct });
