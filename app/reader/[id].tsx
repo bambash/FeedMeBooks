@@ -207,12 +207,17 @@ export default function ReaderScreen() {
           const fileName = audioUris[i].split('/').pop() ?? `file ${i + 1}`;
 
           // Re-use cached segments if this file was already transcribed
-          const cached = completedSet.has(i) ? await loadCachedFileSegments(b.id, i) : null;
+          // Treat a cached-but-empty result as a miss — re-transcribe so alignment can succeed.
+          const rawCached = completedSet.has(i) ? await loadCachedFileSegments(b.id, i) : null;
+          const cached = rawCached && rawCached.length > 0 ? rawCached : null;
           let segs: Awaited<ReturnType<typeof transcribeFile>>;
           if (cached) {
             segs = cached;
             handleLog(`[index] file ${i + 1}/${audioUris.length} (cached): ${fileName} — ${segs.length} segments`);
           } else {
+            if (rawCached && rawCached.length === 0) {
+              handleLog(`[index] file ${i + 1}/${audioUris.length} (cached empty — re-transcribing): ${fileName}`);
+            }
             handleLog(`[index] transcribing file ${i + 1}/${audioUris.length}: ${fileName}`);
             setIndexStatus({ phase: 'transcribing', progress: i / audioUris.length, transcribeFileIndex: i });
             segs = await transcribeFile(audioUris[i], (p) => {
@@ -228,8 +233,10 @@ export default function ReaderScreen() {
             await saveFileSegments(b.id, i, segs, audioUris);
           }
 
-          // Derive this file's duration from its last segment (whisper knows the file length)
-          const fileDurationMs = segs.length > 0 ? segs[segs.length - 1].t1Ms : 0;
+          // Derive this file's duration from its last segment (whisper knows the file length).
+          // Fall back to the store-cached duration (seconds → ms) if whisper returned no segments.
+          const storedDurationMs = (b.session.audioFileDurations[i] ?? 0) * 1000;
+          const fileDurationMs = segs.length > 0 ? segs[segs.length - 1].t1Ms : storedDurationMs;
           actualFileDurationsMs.push(fileDurationMs);
           // Collect the full transcript text for this file (used in content-based alignment)
           fileTranscripts.push(segs.map((s) => s.text).join(' ').trim());
@@ -246,15 +253,44 @@ export default function ReaderScreen() {
 
         handleLog(`[index] aligning ${fileTranscripts.length} audio files to ${chapters.length} chapters by transcript search…`);
         setIndexStatus({ phase: 'aligning', progress: 0 });
+
+        // Diagnostic: check transcript and chapter text quality before alignment
+        {
+          const tokenize = (t: string) => new Set((t.toLowerCase().match(/\b[a-z']{2,}\b/g) ?? []));
+          const t0 = fileTranscripts[0] ?? '';
+          const c0 = chaptersRef.current.find((c) => c.text.trim().length >= 500);
+          const tWords = tokenize(t0);
+          const cWords = tokenize(c0?.text ?? '');
+          const hits = [...tWords].filter((w) => cWords.has(w)).length;
+          const recall = tWords.size > 0 ? hits / tWords.size : 0;
+          handleLog(
+            `[index] diag file0: len=${t0.length} tokens=${tWords.size} sample="${t0.slice(0, 120)}"`,
+          );
+          handleLog(
+            `[index] diag chap0 (${c0?.label ?? 'none'}): len=${c0?.text.length ?? 0} tokens=${cWords.size} recall_vs_file0=${recall.toFixed(3)}`,
+          );
+        }
+
+        const emptyTranscriptCount = fileTranscripts.filter((t) => !t.trim()).length;
+        if (emptyTranscriptCount > 0) {
+          handleLog(`[index] warning: ${emptyTranscriptCount}/${fileTranscripts.length} files produced empty transcripts (silent or failed)`);
+        }
+
         let points = buildSyncPointsFromTranscripts(fileTranscripts, actualFileDurationsMs, chaptersRef.current);
-        if (points.length === 0) {
-          // Fallback: proportional mapping if transcript search produced nothing
-          handleLog('[index] transcript search produced 0 points, falling back to proportional mapping');
+        const contentChapterCount = chaptersRef.current.filter((c) => c.text.trim().length >= 500).length;
+        const uniqueChapters = new Set(points.map((p) => p.chapterIndex)).size;
+
+        if (points.length === 0 || (uniqueChapters <= 1 && contentChapterCount > 3)) {
+          // Transcript search failed (empty transcripts or all files matched same chapter).
+          // Fall back to proportional text-length mapping.
+          handleLog(`[index] transcript search degenerate (${uniqueChapters} unique chapters), falling back to proportional mapping`);
           const propPoints = buildSyncPoints(allSegments, chaptersRef.current, cumulativeMs);
           points = fillFilePositions(propPoints, actualFileDurationsMs);
+          const uniqueChaptersFallback = new Set(points.map((p) => p.chapterIndex)).size;
+          handleLog(`[index] alignment done (proportional) — ${points.length} sync points spanning ${uniqueChaptersFallback} chapters`);
+        } else {
+          handleLog(`[index] alignment done — ${points.length} sync points spanning ${uniqueChapters} chapters`);
         }
-        const uniqueChapters = new Set(points.map((p) => p.chapterIndex)).size;
-        handleLog(`[index] alignment done — ${points.length} sync points spanning ${uniqueChapters} chapters`);
 
         if (indexCancelledRef.current) return;
 

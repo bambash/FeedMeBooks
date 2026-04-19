@@ -159,7 +159,9 @@ export function buildSyncPointsFromTranscripts(
           }
         }
 
-        if (bestScore >= 0.2) {
+        // Threshold kept low (0.05) because audio files span multiple chapters
+        // and common vocabulary alone can push recall past 0.2 for the right chapter.
+        if (bestScore >= 0.05) {
           lastOrdinal = bestOrdinal;
         }
       }
