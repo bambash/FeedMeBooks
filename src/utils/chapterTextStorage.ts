@@ -13,6 +13,8 @@ export interface StoredChapterText {
   chapterIndex: number;
   /** Up to 2 000 chars of plain chapter text for recall-based matching */
   text: string;
+  /** TOC label (chapter title) */
+  label?: string;
 }
 
 const key = (bookId: string) => `feedmebooks:chaptertexts:${bookId}`;
