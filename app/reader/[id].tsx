@@ -32,6 +32,8 @@ interface SyncBanner {
   targetSeconds?: number;
   /** When set, jump to this spine chapter index instead of using percentage */
   targetChapterIndex?: number;
+  /** Human-readable label for targetChapterIndex (e.g. "57: WANDERSAIL") */
+  targetChapterLabel?: string;
 }
 
 type IndexPhase = 'idle' | 'extracting' | 'downloading' | 'transcribing' | 'aligning' | 'done' | 'error';
@@ -133,11 +135,14 @@ export default function ReaderScreen() {
     return () => { indexCancelledRef.current = true; };
   }, [book?.id]);
 
-  // Load persisted sync map when the book changes
+  // Load persisted sync map and chapter texts when the book changes
   useEffect(() => {
     if (!book?.id) return;
     loadSyncMap(book.id).then((map) => {
       if (map) setSyncMap(map);
+    });
+    loadChapterTexts(book.id).then((texts) => {
+      if (texts?.length) chaptersRef.current = texts;
     });
   }, [book?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -369,7 +374,8 @@ export default function ReaderScreen() {
               ` → ch=${pt?.chapterIndex ?? 'null'}`,
             );
             if (pt) {
-              setSyncBanner({ targetMode: 'ebook', percentage: pct, targetChapterIndex: pt.chapterIndex });
+              const chLabel = chaptersRef.current.find((c) => c.chapterIndex === pt.chapterIndex)?.label;
+              setSyncBanner({ targetMode: 'ebook', percentage: pct, targetChapterIndex: pt.chapterIndex, targetChapterLabel: chLabel });
 
               // JIT refine: use the cached transcript segments for the current file
               // to extract text near the current playback position, then match against
@@ -395,8 +401,9 @@ export default function ReaderScreen() {
                     const jitChapter = findChapterByWindowText(windowText, chapterTexts);
                     handleLog(`[sync] JIT result: "${windowText.slice(0, 60)}…" → ch=${jitChapter ?? 'no match'}`);
                     if (jitChapter != null) {
+                      const jitLabel = chapterTexts.find((c) => c.chapterIndex === jitChapter)?.label;
                       setSyncBanner((prev) =>
-                        prev ? { ...prev, targetChapterIndex: jitChapter } : prev,
+                        prev ? { ...prev, targetChapterIndex: jitChapter, targetChapterLabel: jitLabel } : prev,
                       );
                     }
                   });
@@ -611,7 +618,7 @@ export default function ReaderScreen() {
         <View style={styles.syncBanner}>
           <Text style={styles.syncBannerText}>
             {syncBanner.targetChapterIndex != null
-              ? `Jump to chapter ${syncBanner.targetChapterIndex + 1} — where you left off ${
+              ? `Jump to "${syncBanner.targetChapterLabel ?? `chapter ${syncBanner.targetChapterIndex + 1}`}" — where you left off ${
                   syncBanner.targetMode === 'ebook' ? 'listening' : 'reading'
                 }?`
               : `Jump to ${Math.round(syncBanner.percentage * 100)}% — where you left off ${
