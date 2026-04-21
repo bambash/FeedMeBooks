@@ -264,23 +264,29 @@ export default function ReaderScreen() {
         // Diagnostic: check transcript and chapter text quality before alignment
         {
           const tokenize = (t: string) => new Set((t.toLowerCase().match(/\b[a-z']{2,}\b/g) ?? []));
-          const t0 = fileTranscripts[0] ?? '';
-          const c0 = chaptersRef.current.find((c) => c.text.trim().length >= 500);
-          const tWords = tokenize(t0);
-          const cWords = tokenize(c0?.text ?? '');
-          const hits = [...tWords].filter((w) => cWords.has(w)).length;
-          const recall = tWords.size > 0 ? hits / tWords.size : 0;
-          handleLog(
-            `[index] diag file0: len=${t0.length} tokens=${tWords.size} sample="${t0.slice(0, 120)}"`,
-          );
-          handleLog(
-            `[index] diag chap0 (${c0?.label ?? 'none'}): len=${c0?.text.length ?? 0} tokens=${cWords.size} recall_vs_file0=${recall.toFixed(3)}`,
-          );
-        }
+          const contentChs = chaptersRef.current.filter((c) => c.text.trim().length >= 500);
+          const chWordSets = contentChs.map((c) => ({ label: c.label, words: tokenize(c.text) }));
 
-        const emptyTranscriptCount = fileTranscripts.filter((t) => !t.trim()).length;
-        if (emptyTranscriptCount > 0) {
-          handleLog(`[index] warning: ${emptyTranscriptCount}/${fileTranscripts.length} files produced empty transcripts (silent or failed)`);
+          // Log summary for every file + best chapter score
+          let emptyCount = 0;
+          for (let fi = 0; fi < fileTranscripts.length; fi++) {
+            const t = fileTranscripts[fi] ?? '';
+            if (!t.trim()) { emptyCount++; continue; }
+            const tWords = tokenize(t);
+            if (tWords.size === 0) { emptyCount++; continue; }
+            let bestScore = 0;
+            let bestLabel = 'none';
+            for (const { label, words } of chWordSets) {
+              let hits = 0;
+              for (const w of tWords) { if (words.has(w)) hits++; }
+              const score = hits / tWords.size;
+              if (score > bestScore) { bestScore = score; bestLabel = label ?? '?'; }
+            }
+            handleLog(
+              `[index] diag file${fi}: len=${t.length} tokens=${tWords.size} sample="${t.slice(0, 60)}" bestChap="${bestLabel}" bestScore=${bestScore.toFixed(3)}`,
+            );
+          }
+          if (emptyCount > 0) handleLog(`[index] warning: ${emptyCount}/${fileTranscripts.length} files produced empty/blank transcripts`);
         }
 
         let points = buildSyncPointsFromTranscripts(fileTranscripts, actualFileDurationsMs, chaptersRef.current);
