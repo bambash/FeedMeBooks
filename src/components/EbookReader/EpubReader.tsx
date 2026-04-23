@@ -23,6 +23,10 @@ interface Props {
   textExtractRequest?: number;
   /** Receives chapter texts extracted from the epub (response to textExtractRequest) */
   onTextExtracted?: (chapters: { chapterIndex: number; text: string }[]) => void;
+  /** Increment to navigate to the next chapter */
+  goNextRequest?: number;
+  /** Increment to navigate to the previous chapter */
+  goPrevRequest?: number;
   /** When true the WebView will auto-scroll at scrollSpeed px/s */
   autoScroll?: boolean;
   /** Auto-scroll speed in pixels per second (default 50) */
@@ -43,6 +47,8 @@ export default function EpubReader({
   targetChapter,
   textExtractRequest = 0,
   onTextExtracted,
+  goNextRequest = 0,
+  goPrevRequest = 0,
   autoScroll = false,
   scrollSpeed = 50,
   onAutoScrollEnd,
@@ -159,6 +165,15 @@ export default function EpubReader({
       sendToWebView({ type: 'extractText' });
     }
   }, [textExtractRequest]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Chapter navigation triggered from parent (counter pattern)
+  useEffect(() => {
+    if (goNextRequest > 0 && webViewReadyRef.current) sendToWebView({ type: 'next' });
+  }, [goNextRequest]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (goPrevRequest > 0 && webViewReadyRef.current) sendToWebView({ type: 'prev' });
+  }, [goPrevRequest]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Start / stop auto-scroll in the WebView when the prop changes
   useEffect(() => {

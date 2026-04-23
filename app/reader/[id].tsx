@@ -71,6 +71,8 @@ export default function ReaderScreen() {
   const [showLogViewer, setShowLogViewer] = useState(false);
   const [autoScrollActive, setAutoScrollActive] = useState(false);
   const [scrollSpeed, setScrollSpeed] = useState(50); // px/s
+  const [epubGoNextRequest, setEpubGoNextRequest] = useState(0);
+  const [epubGoPrevRequest, setEpubGoPrevRequest] = useState(0);
   const logsRef = useRef<string[]>([]);
 
   // Sync map (word-level audio↔ebook alignment)
@@ -297,7 +299,7 @@ export default function ReaderScreen() {
           // Transcript search failed (empty transcripts or all files matched same chapter).
           // Fall back to proportional text-length mapping.
           handleLog(`[index] transcript search degenerate (${uniqueChapters} unique chapters), falling back to proportional mapping`);
-          const propPoints = buildSyncPoints(allSegments, chaptersRef.current, cumulativeMs);
+          const propPoints = buildSyncPoints(allSegments, chaptersRef.current, cumulativeMs, { equalAllocation: true });
           points = fillFilePositions(propPoints, actualFileDurationsMs);
           const uniqueChaptersFallback = new Set(points.map((p) => p.chapterIndex)).size;
           handleLog(`[index] alignment done (proportional) — ${points.length} sync points spanning ${uniqueChaptersFallback} chapters`);
@@ -657,13 +659,31 @@ export default function ReaderScreen() {
               targetChapter={epubTargetChapter}
               textExtractRequest={textExtractRequest}
               onTextExtracted={handleTextExtracted}
+              goNextRequest={epubGoNextRequest}
+              goPrevRequest={epubGoPrevRequest}
               autoScroll={autoScrollActive}
               scrollSpeed={scrollSpeed}
               onAutoScrollEnd={handleAutoScrollEnd}
               onLog={devMode ? handleLog : undefined}
             />
+            {/* Floating prev-chapter button — bottom-left */}
+            <View style={styles.chapterNavLeft} pointerEvents="box-none">
+              <Pressable
+                style={styles.chapterNavBtn}
+                onPress={() => { setAutoScrollActive(false); setEpubGoPrevRequest((v) => v + 1); }}
+              >
+                <Text style={styles.chapterNavIcon}>‹</Text>
+              </Pressable>
+            </View>
+
             {/* Floating auto-scroll control — bottom-right of the reader */}
             <View style={styles.autoScrollBar} pointerEvents="box-none">
+              <Pressable
+                style={styles.chapterNavBtn}
+                onPress={() => { setAutoScrollActive(false); setEpubGoNextRequest((v) => v + 1); }}
+              >
+                <Text style={styles.chapterNavIcon}>›</Text>
+              </Pressable>
               {autoScrollActive && (
                 <>
                   <Pressable
@@ -1119,6 +1139,27 @@ const styles = StyleSheet.create({
   syncDismissText: {
     ...typography.small,
     color: colors.textMuted,
+  },
+  chapterNavLeft: {
+    position: 'absolute',
+    left: spacing.md,
+    bottom: spacing.lg,
+    zIndex: 20,
+  },
+  chapterNavBtn: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: 'rgba(30,20,50,0.75)',
+    borderWidth: 1,
+    borderColor: colors.border,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  chapterNavIcon: {
+    fontSize: 22,
+    color: colors.text,
+    lineHeight: 26,
   },
   autoScrollBar: {
     position: 'absolute',

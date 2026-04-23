@@ -34,17 +34,25 @@ export interface ChapterText {
  * Build a list of sync points from chapter texts and total audio duration.
  *
  * Each non-empty chapter gets one sync point whose audioMs is derived by
- * dividing the timeline proportionally by chapter text length.
+ * dividing the timeline either proportionally by chapter text length (default)
+ * or equally per chapter (opts.equalAllocation = true).
+ *
+ * Equal allocation is more accurate when the audiobook uses a constant
+ * narration rate regardless of chapter length (which is the common case).
+ * Text-length allocation is only better when chapter lengths vary by 10×+
+ * and narration rate is known to track text length.
  *
  * @param segments  Word-level segments (used only to derive totalMs if caller
  *                  passes 0; otherwise unused in the proportional algorithm)
  * @param chapters  Epub chapter texts (chapterIndex = spine index, 0-based)
  * @param totalMs   Total audiobook duration in ms
+ * @param opts      { equalAllocation?: boolean }
  */
 export function buildSyncPoints(
   segments: TranscribeSegment[],
   chapters: ChapterText[],
   totalMs: number,
+  opts?: { equalAllocation?: boolean },
 ): SyncPoint[] {
   // Fall back to segment-derived duration if caller could not supply totalMs
   const effectiveTotalMs =
@@ -62,14 +70,19 @@ export function buildSyncPoints(
   const contentChapters = chapters.filter((c) => c.text.trim().length >= 500);
   if (!contentChapters.length) return [];
 
-  const totalChars = contentChapters.reduce((sum, c) => sum + c.text.length, 0);
-  if (!totalChars) return [];
+  const n = contentChapters.length;
+  const useEqual = opts?.equalAllocation ?? false;
+  const totalChars = useEqual ? 0 : contentChapters.reduce((sum, c) => sum + c.text.length, 0);
+  if (!useEqual && !totalChars) return [];
 
   const points: SyncPoint[] = [];
   let cumChars = 0;
 
-  for (const chapter of contentChapters) {
-    const audioMs = Math.round((cumChars / totalChars) * effectiveTotalMs);
+  for (let i = 0; i < n; i++) {
+    const chapter = contentChapters[i];
+    const audioMs = useEqual
+      ? Math.round((i / n) * effectiveTotalMs)
+      : Math.round((cumChars / totalChars) * effectiveTotalMs);
     points.push({
       audioMs,
       fileIndex: 0,          // filled in by fillFilePositions()
@@ -77,7 +90,7 @@ export function buildSyncPoints(
       chapterIndex: chapter.chapterIndex,
       withinChapterFraction: 0,
     });
-    cumChars += chapter.text.length;
+    if (!useEqual) cumChars += chapter.text.length;
   }
 
   return points;
