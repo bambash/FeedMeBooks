@@ -88,6 +88,35 @@ export function releaseWhisperContext(): void {
   _ctx = null;
 }
 
+// ─── Window transcription ────────────────────────────────────────────────────
+
+/**
+ * Transcribe a short window of audio for real-time chapter matching.
+ * Does NOT require word-level timestamps — faster than a full transcription.
+ *
+ * @param audioUri   Local file URI (file://...)
+ * @param offsetMs   Start offset into the file in milliseconds
+ * @param durationMs Window length in ms (default 15 000)
+ * @returns Joined plain text of all segments in the window
+ */
+export async function transcribeWindow(
+  audioUri: string,
+  offsetMs: number,
+  durationMs: number = 15_000,
+): Promise<string> {
+  const ctx = await getContext();
+
+  const { promise } = ctx.transcribe(audioUri, {
+    language: 'en',
+    offset: offsetMs,
+    duration: durationMs,
+    tokenTimestamps: false,
+  });
+
+  const { segments } = await promise;
+  return segments.map((s) => s.text).join(' ').trim();
+}
+
 // ─── Transcription ──────────────────────────────────────────────────────────
 
 /**

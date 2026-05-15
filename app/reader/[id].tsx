@@ -17,10 +17,11 @@ import EbookReader from '../../src/components/EbookReader';
 import { useLibraryStore } from '../../src/store/libraryStore';
 import { colors, radius, spacing, typography } from '../../src/theme';
 import type { EbookPosition, ReaderMode, SyncMap } from '../../src/types';
-import { buildSyncPoints, fillFilePositions, lookupByAudio, type ChapterText } from '../../src/utils/alignSync';
-import { downloadModel, isModelDownloaded, releaseWhisperContext, transcribeFile } from '../../src/utils/transcribeAudio';
+import { buildSyncPoints, buildSyncPointsFromTranscripts, fillFilePositions, findChapterByWindowText, lookupByAudio, lookupByChapter, type ChapterText } from '../../src/utils/alignSync';
+import { downloadModel, isModelDownloaded, releaseWhisperContext, transcribeFile, transcribeWindow } from '../../src/utils/transcribeAudio';
 import { deleteSyncMap, loadSyncMap, saveSyncMap } from '../../src/utils/syncMapStorage';
 import { deleteTranscriptionCache, loadCachedFileSegments, loadCacheMeta, saveFileSegments } from '../../src/utils/transcriptionCache';
+import { deleteChapterTexts, loadChapterTexts, saveChapterTexts } from '../../src/utils/chapterTextStorage';
 
 interface SyncBanner {
   targetMode: ReaderMode;
@@ -31,6 +32,8 @@ interface SyncBanner {
   targetSeconds?: number;
   /** When set, jump to this spine chapter index instead of using percentage */
   targetChapterIndex?: number;
+  /** Human-readable label for targetChapterIndex (e.g. "57: WANDERSAIL") */
+  targetChapterLabel?: string;
 }
 
 type IndexPhase = 'idle' | 'extracting' | 'downloading' | 'transcribing' | 'aligning' | 'done' | 'error';
@@ -66,6 +69,10 @@ export default function ReaderScreen() {
   const [devMode, setDevMode] = useState(false);
   const [logs, setLogs] = useState<string[]>([]);
   const [showLogViewer, setShowLogViewer] = useState(false);
+  const [autoScrollActive, setAutoScrollActive] = useState(false);
+  const [scrollSpeed, setScrollSpeed] = useState(50); // px/s
+  const [epubGoNextRequest, setEpubGoNextRequest] = useState(0);
+  const [epubGoPrevRequest, setEpubGoPrevRequest] = useState(0);
   const logsRef = useRef<string[]>([]);
 
   // Sync map (word-level audio↔ebook alignment)
@@ -130,11 +137,14 @@ export default function ReaderScreen() {
     return () => { indexCancelledRef.current = true; };
   }, [book?.id]);
 
-  // Load persisted sync map when the book changes
+  // Load persisted sync map and chapter texts when the book changes
   useEffect(() => {
     if (!book?.id) return;
     loadSyncMap(book.id).then((map) => {
       if (map) setSyncMap(map);
+    });
+    loadChapterTexts(book.id).then((texts) => {
+      if (texts?.length) chaptersRef.current = texts;
     });
   }, [book?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -150,7 +160,13 @@ export default function ReaderScreen() {
     async (chapters: ChapterText[]) => {
       chaptersRef.current = chapters;
       const b = bookRef.current;
-      handleLog(`[index] epub extracted ${chapters.length} chapters`);
+      const substantiveChapters = chapters.filter((c) => c.text.trim().length >= 500);
+      handleLog(
+        `[index] epub extracted ${chapters.length} chapters (${substantiveChapters.length} with content ≥500 chars)` +
+        (chapters[0]?.label != null
+          ? ': ' + substantiveChapters.map((c) => c.label || `spine${c.chapterIndex}`).join(', ')
+          : ''),
+      );
       if (!b?.audioUris?.length || !chapters.length) {
         const err = 'No audio or ebook content found';
         handleLog(`[index] error: ${err}`);
@@ -181,6 +197,7 @@ export default function ReaderScreen() {
         // the user hasn't played yet.
         const audioUris = b.audioUris!;
         const actualFileDurationsMs: number[] = [];
+        const fileTranscripts: string[] = []; // one plain-text string per audio file
         let cumulativeMs = 0;
         const allSegments: Awaited<ReturnType<typeof transcribeFile>> = [];
 
@@ -199,12 +216,17 @@ export default function ReaderScreen() {
           const fileName = audioUris[i].split('/').pop() ?? `file ${i + 1}`;
 
           // Re-use cached segments if this file was already transcribed
-          const cached = completedSet.has(i) ? await loadCachedFileSegments(b.id, i) : null;
+          // Treat a cached-but-empty result as a miss — re-transcribe so alignment can succeed.
+          const rawCached = completedSet.has(i) ? await loadCachedFileSegments(b.id, i) : null;
+          const cached = rawCached && rawCached.length > 0 ? rawCached : null;
           let segs: Awaited<ReturnType<typeof transcribeFile>>;
           if (cached) {
             segs = cached;
             handleLog(`[index] file ${i + 1}/${audioUris.length} (cached): ${fileName} — ${segs.length} segments`);
           } else {
+            if (rawCached && rawCached.length === 0) {
+              handleLog(`[index] file ${i + 1}/${audioUris.length} (cached empty — re-transcribing): ${fileName}`);
+            }
             handleLog(`[index] transcribing file ${i + 1}/${audioUris.length}: ${fileName}`);
             setIndexStatus({ phase: 'transcribing', progress: i / audioUris.length, transcribeFileIndex: i });
             segs = await transcribeFile(audioUris[i], (p) => {
@@ -220,9 +242,13 @@ export default function ReaderScreen() {
             await saveFileSegments(b.id, i, segs, audioUris);
           }
 
-          // Derive this file's duration from its last segment (whisper knows the file length)
-          const fileDurationMs = segs.length > 0 ? segs[segs.length - 1].t1Ms : 0;
+          // Derive this file's duration from its last segment (whisper knows the file length).
+          // Fall back to the store-cached duration (seconds → ms) if whisper returned no segments.
+          const storedDurationMs = (b.session.audioFileDurations[i] ?? 0) * 1000;
+          const fileDurationMs = segs.length > 0 ? segs[segs.length - 1].t1Ms : storedDurationMs;
           actualFileDurationsMs.push(fileDurationMs);
+          // Collect the full transcript text for this file (used in content-based alignment)
+          fileTranscripts.push(segs.map((s) => s.text).join(' ').trim());
 
           // Offset segment timestamps so they're relative to the whole audiobook
           for (const s of segs) {
@@ -234,12 +260,52 @@ export default function ReaderScreen() {
         releaseWhisperContext();
         if (indexCancelledRef.current) return;
 
-        handleLog(`[index] aligning ${allSegments.length} segments to ${chapters.length} chapters…`);
-        // Align transcript to epub chapters
+        handleLog(`[index] aligning ${fileTranscripts.length} audio files to ${chapters.length} chapters by transcript search…`);
         setIndexStatus({ phase: 'aligning', progress: 0 });
-        let points = buildSyncPoints(allSegments, chaptersRef.current, cumulativeMs);
-        points = fillFilePositions(points, actualFileDurationsMs);
-        handleLog(`[index] alignment done — ${points.length} sync points`);
+
+        // Diagnostic: check transcript and chapter text quality before alignment
+        {
+          const tokenize = (t: string) => new Set((t.toLowerCase().match(/\b[a-z']{2,}\b/g) ?? []));
+          const contentChs = chaptersRef.current.filter((c) => c.text.trim().length >= 500);
+          const chWordSets = contentChs.map((c) => ({ label: c.label, words: tokenize(c.text) }));
+
+          // Log summary for every file + best chapter score
+          let emptyCount = 0;
+          for (let fi = 0; fi < fileTranscripts.length; fi++) {
+            const t = fileTranscripts[fi] ?? '';
+            if (!t.trim()) { emptyCount++; continue; }
+            const tWords = tokenize(t);
+            if (tWords.size === 0) { emptyCount++; continue; }
+            let bestScore = 0;
+            let bestLabel = 'none';
+            for (const { label, words } of chWordSets) {
+              let hits = 0;
+              for (const w of tWords) { if (words.has(w)) hits++; }
+              const score = hits / tWords.size;
+              if (score > bestScore) { bestScore = score; bestLabel = label ?? '?'; }
+            }
+            handleLog(
+              `[index] diag file${fi}: len=${t.length} tokens=${tWords.size} sample="${t.slice(0, 60)}" bestChap="${bestLabel}" bestScore=${bestScore.toFixed(3)}`,
+            );
+          }
+          if (emptyCount > 0) handleLog(`[index] warning: ${emptyCount}/${fileTranscripts.length} files produced empty/blank transcripts`);
+        }
+
+        let points = buildSyncPointsFromTranscripts(fileTranscripts, actualFileDurationsMs, chaptersRef.current);
+        const contentChapterCount = chaptersRef.current.filter((c) => c.text.trim().length >= 500).length;
+        const uniqueChapters = new Set(points.map((p) => p.chapterIndex)).size;
+
+        if (points.length === 0 || (uniqueChapters <= 1 && contentChapterCount > 3)) {
+          // Transcript search failed (empty transcripts or all files matched same chapter).
+          // Fall back to proportional text-length mapping.
+          handleLog(`[index] transcript search degenerate (${uniqueChapters} unique chapters), falling back to proportional mapping`);
+          const propPoints = buildSyncPoints(allSegments, chaptersRef.current, cumulativeMs, { equalAllocation: true });
+          points = fillFilePositions(propPoints, actualFileDurationsMs);
+          const uniqueChaptersFallback = new Set(points.map((p) => p.chapterIndex)).size;
+          handleLog(`[index] alignment done (proportional) — ${points.length} sync points spanning ${uniqueChaptersFallback} chapters`);
+        } else {
+          handleLog(`[index] alignment done — ${points.length} sync points spanning ${uniqueChapters} chapters`);
+        }
 
         if (indexCancelledRef.current) return;
 
@@ -251,6 +317,7 @@ export default function ReaderScreen() {
         };
         await saveSyncMap(map);
         await deleteTranscriptionCache(b.id);
+        await saveChapterTexts(b.id, chapters);
         setSyncMapCreatedAt(b.id, map.createdAt);
         setSyncMap(map);
         setIndexStatus({ phase: 'done', progress: 1 });
@@ -280,7 +347,7 @@ export default function ReaderScreen() {
   const handleRebuildIndex = useCallback(async () => {
     const b = bookRef.current;
     if (!b) return;
-    await Promise.all([deleteSyncMap(b.id), deleteTranscriptionCache(b.id)]);
+    await Promise.all([deleteSyncMap(b.id), deleteTranscriptionCache(b.id), deleteChapterTexts(b.id)]);
     setSyncMapCreatedAt(b.id, undefined);
     setSyncMap(null);
     setIndexStatus(null);
@@ -307,30 +374,108 @@ export default function ReaderScreen() {
           if (currentMap?.points.length && pct > 0.01) {
             const currentAudioMs = elapsed * 1000;
             const pt = lookupByAudio(currentMap.points, currentAudioMs);
+            handleLog(
+              `[sync] lookup: fileIdx=${b.session.audioFileIndex} pos=${b.session.audioPosition.toFixed(1)}s` +
+              ` elapsed=${elapsed.toFixed(0)}s currentAudioMs=${currentAudioMs}` +
+              ` mapTotalMs=${currentMap.totalAudioMs} points=${currentMap.points.length}` +
+              ` firstPtMs=${currentMap.points[0]?.audioMs} lastPtMs=${currentMap.points[currentMap.points.length - 1]?.audioMs}` +
+              ` → ch=${pt?.chapterIndex ?? 'null'}`,
+            );
             if (pt) {
-              setSyncBanner({ targetMode: 'ebook', percentage: pct, targetChapterIndex: pt.chapterIndex });
+              const chLabel = chaptersRef.current.find((c) => c.chapterIndex === pt.chapterIndex)?.label;
+              setSyncBanner({ targetMode: 'ebook', percentage: pct, targetChapterIndex: pt.chapterIndex, targetChapterLabel: chLabel });
+
+              // JIT refine: use the cached transcript segments for the current file
+              // to extract text near the current playback position, then match against
+              // chapter texts.  This avoids re-transcribing the audio (which can fail
+              // for some formats) and is instant since the segments are already cached.
+              const posMs = b.session.audioPosition * 1000;
+              const windowStartMs = Math.max(0, posMs - 7500);
+              const windowEndMs = posMs + 7500;
+              const fileIdx = b.session.audioFileIndex;
+              const bookId = b.id;
+              loadCachedFileSegments(bookId, fileIdx)
+                .then((cachedSegs) => {
+                  if (!cachedSegs?.length) return;
+                  // Extract segments that overlap the ±7.5s window around current position
+                  const windowText = cachedSegs
+                    .filter((s) => s.t1Ms >= windowStartMs && s.t0Ms <= windowEndMs)
+                    .map((s) => s.text)
+                    .join(' ')
+                    .trim();
+                  if (!windowText) return;
+                  return loadChapterTexts(bookId).then((chapterTexts) => {
+                    if (!chapterTexts?.length) return;
+                    const jitChapter = findChapterByWindowText(windowText, chapterTexts);
+                    handleLog(`[sync] JIT result: "${windowText.slice(0, 60)}…" → ch=${jitChapter ?? 'no match'}`);
+                    if (jitChapter != null) {
+                      const jitLabel = chapterTexts.find((c) => c.chapterIndex === jitChapter)?.label;
+                      setSyncBanner((prev) =>
+                        prev ? { ...prev, targetChapterIndex: jitChapter, targetChapterLabel: jitLabel } : prev,
+                      );
+                    }
+                  });
+                })
+                .catch((err) => handleLog(`[sync] JIT scan error: ${err}`));
             }
           } else if (pct > 0.01) {
             setSyncBanner({ targetMode: 'ebook', percentage: pct });
           }
         } else if (mode === 'ebook' && next === 'audio' && totalDuration > 0) {
-          // Compute ebook percentage → offer jump in audiobook
           const pct = b.session.ebookPosition.percentage;
-          if (pct > 0.01) {
-            const targetElapsed = pct * totalDuration;
-            let cumulative = 0;
-            let targetFileIndex = durations.length - 1;
-            let targetSeconds = durations[durations.length - 1] ?? 0;
-            for (let i = 0; i < durations.length; i++) {
-              const d = durations[i] ?? 0;
-              if (cumulative + d >= targetElapsed) {
-                targetFileIndex = i;
-                targetSeconds = targetElapsed - cumulative;
-                break;
+          const spineIndex = b.session.ebookPosition.spineIndex ?? -1;
+          // Allow sync when we have a valid spine index even if pct is 0
+          // (scrolled-doc mode may report pct=0 until locations are generated)
+          if (spineIndex >= 0 || pct > 0.01) {
+            const currentMap = syncMap;
+            // Prefer sync-map lookup by spine/chapter index (accurate)
+            if (currentMap?.points.length && spineIndex >= 0) {
+              const pt = lookupByChapter(currentMap.points, spineIndex);
+              if (pt) {
+                // Re-derive file position from pt.audioMs using the session's actual
+                // file durations rather than the pre-computed fileIndex/fileSeconds stored
+                // in the sync map (those were computed from whisper timestamps which can
+                // be truncated for long mp4 files, producing badly wrong file positions).
+                let targetFileIndex = durations.length - 1;
+                let targetSeconds = durations[durations.length - 1] ?? 0;
+                let cum = 0;
+                for (let i = 0; i < durations.length; i++) {
+                  const d = (durations[i] ?? 0) * 1000;
+                  if (cum + d > pt.audioMs) {
+                    targetFileIndex = i;
+                    targetSeconds = (pt.audioMs - cum) / 1000;
+                    break;
+                  }
+                  cum += d;
+                }
+                handleLog(`[sync] ebook→audio: spineIdx=${spineIndex} audioMs=${pt.audioMs} → fileIdx=${targetFileIndex} fileSeconds=${targetSeconds.toFixed(1)}`);
+                setSyncBanner({
+                  targetMode: 'audio',
+                  percentage: pct,
+                  targetFileIndex,
+                  targetSeconds,
+                });
+              } else {
+                setSyncBanner({ targetMode: 'audio', percentage: pct });
               }
-              cumulative += d;
+            } else {
+              // Fallback: percentage × total duration (no sync map or no spine info yet)
+              handleLog(`[sync] ebook→audio: no sync map or spineIndex, using pct=${pct.toFixed(3)}`);
+              const targetElapsed = pct * totalDuration;
+              let cumulative = 0;
+              let targetFileIndex = durations.length - 1;
+              let targetSeconds = durations[durations.length - 1] ?? 0;
+              for (let i = 0; i < durations.length; i++) {
+                const d = durations[i] ?? 0;
+                if (cumulative + d >= targetElapsed) {
+                  targetFileIndex = i;
+                  targetSeconds = targetElapsed - cumulative;
+                  break;
+                }
+                cumulative += d;
+              }
+              setSyncBanner({ targetMode: 'audio', percentage: pct, targetFileIndex, targetSeconds });
             }
-            setSyncBanner({ targetMode: 'audio', percentage: pct, targetFileIndex, targetSeconds });
           }
         }
       }
@@ -340,6 +485,7 @@ export default function ReaderScreen() {
       if (mode === 'ebook') {
         setEpubTargetPercentage(null);
         setEpubTargetChapter(null);
+        setAutoScrollActive(false);
       }
 
       Animated.sequence([
@@ -387,6 +533,10 @@ export default function ReaderScreen() {
     },
     [book, updateAudioFileDuration],
   );
+
+  const handleAutoScrollEnd = useCallback(() => {
+    setAutoScrollActive(false);
+  }, []);
 
   const copyLogs = useCallback(async () => {
     const text = logsRef.current.join('\n') || '(no logs yet)';
@@ -476,7 +626,7 @@ export default function ReaderScreen() {
         <View style={styles.syncBanner}>
           <Text style={styles.syncBannerText}>
             {syncBanner.targetChapterIndex != null
-              ? `Jump to chapter ${syncBanner.targetChapterIndex + 1} — where you left off ${
+              ? `Jump to "${syncBanner.targetChapterLabel ?? `chapter ${syncBanner.targetChapterIndex + 1}`}" — where you left off ${
                   syncBanner.targetMode === 'ebook' ? 'listening' : 'reading'
                 }?`
               : `Jump to ${Math.round(syncBanner.percentage * 100)}% — where you left off ${
@@ -509,8 +659,60 @@ export default function ReaderScreen() {
               targetChapter={epubTargetChapter}
               textExtractRequest={textExtractRequest}
               onTextExtracted={handleTextExtracted}
+              goNextRequest={epubGoNextRequest}
+              goPrevRequest={epubGoPrevRequest}
+              autoScroll={autoScrollActive}
+              scrollSpeed={scrollSpeed}
+              onAutoScrollEnd={handleAutoScrollEnd}
               onLog={devMode ? handleLog : undefined}
             />
+            {/* Floating prev-chapter button — bottom-left */}
+            <View style={styles.chapterNavLeft} pointerEvents="box-none">
+              <Pressable
+                style={styles.chapterNavBtn}
+                onPress={() => { setAutoScrollActive(false); setEpubGoPrevRequest((v) => v + 1); }}
+              >
+                <Text style={styles.chapterNavIcon}>‹</Text>
+              </Pressable>
+            </View>
+
+            {/* Floating auto-scroll control — bottom-right of the reader */}
+            <View style={styles.autoScrollBar} pointerEvents="box-none">
+              <Pressable
+                style={styles.chapterNavBtn}
+                onPress={() => { setAutoScrollActive(false); setEpubGoNextRequest((v) => v + 1); }}
+              >
+                <Text style={styles.chapterNavIcon}>›</Text>
+              </Pressable>
+              {autoScrollActive && (
+                <>
+                  <Pressable
+                    style={[styles.autoScrollSpeedBtn, scrollSpeed === 30 && styles.autoScrollSpeedBtnActive]}
+                    onPress={() => setScrollSpeed(30)}
+                  >
+                    <Text style={styles.autoScrollSpeedText}>S</Text>
+                  </Pressable>
+                  <Pressable
+                    style={[styles.autoScrollSpeedBtn, scrollSpeed === 50 && styles.autoScrollSpeedBtnActive]}
+                    onPress={() => setScrollSpeed(50)}
+                  >
+                    <Text style={styles.autoScrollSpeedText}>M</Text>
+                  </Pressable>
+                  <Pressable
+                    style={[styles.autoScrollSpeedBtn, scrollSpeed === 90 && styles.autoScrollSpeedBtnActive]}
+                    onPress={() => setScrollSpeed(90)}
+                  >
+                    <Text style={styles.autoScrollSpeedText}>F</Text>
+                  </Pressable>
+                </>
+              )}
+              <Pressable
+                style={[styles.autoScrollBtn, autoScrollActive && styles.autoScrollBtnActive]}
+                onPress={() => setAutoScrollActive((v) => !v)}
+              >
+                <Text style={styles.autoScrollIcon}>{autoScrollActive ? '⏸' : '▶'}</Text>
+              </Pressable>
+            </View>
             {/* Compact audio strip while reading — if audio exists */}
             {canAudio && (
               <AudioPlayer
@@ -897,6 +1099,7 @@ const styles = StyleSheet.create({
   },
   content: {
     flex: 1,
+    position: 'relative',
   },
   syncBanner: {
     flexDirection: 'row',
@@ -936,6 +1139,72 @@ const styles = StyleSheet.create({
   syncDismissText: {
     ...typography.small,
     color: colors.textMuted,
+  },
+  chapterNavLeft: {
+    position: 'absolute',
+    left: spacing.md,
+    bottom: spacing.lg,
+    zIndex: 20,
+  },
+  chapterNavBtn: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: 'rgba(30,20,50,0.75)',
+    borderWidth: 1,
+    borderColor: colors.border,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  chapterNavIcon: {
+    fontSize: 22,
+    color: colors.text,
+    lineHeight: 26,
+  },
+  autoScrollBar: {
+    position: 'absolute',
+    right: spacing.md,
+    bottom: spacing.lg,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.xs,
+    zIndex: 20,
+  },
+  autoScrollBtn: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: 'rgba(30,20,50,0.75)',
+    borderWidth: 1,
+    borderColor: colors.border,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  autoScrollBtnActive: {
+    backgroundColor: colors.primary,
+    borderColor: colors.primary,
+  },
+  autoScrollIcon: {
+    fontSize: 18,
+    color: colors.white,
+  },
+  autoScrollSpeedBtn: {
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    backgroundColor: 'rgba(30,20,50,0.75)',
+    borderWidth: 1,
+    borderColor: colors.border,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  autoScrollSpeedBtnActive: {
+    borderColor: colors.primaryLight,
+  },
+  autoScrollSpeedText: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: colors.text,
   },
 });
 

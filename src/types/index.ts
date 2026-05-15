@@ -35,6 +35,8 @@ export interface EbookPosition {
   scrollY?: number;
   /** 0–1 fractional progress */
   percentage: number;
+  /** Spine item index of the currently displayed epub chapter (-1 if unknown) */
+  spineIndex?: number;
 }
 
 export interface BookSession {
