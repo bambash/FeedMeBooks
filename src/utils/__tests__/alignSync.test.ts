@@ -11,6 +11,7 @@ import {
   type ChapterText,
   type Anchor,
 } from '../alignSync';
+import type { PositionAnchor } from '../../types';
 import type { TranscribeSegment } from '../transcribeAudio';
 
 // ─── helpers ────────────────────────────────────────────────────────────────
