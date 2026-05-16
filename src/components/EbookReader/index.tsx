@@ -23,6 +23,14 @@ interface Props {
   scrollSpeed?: number;
   onAutoScrollEnd?: () => void;
   onLog?: (message: string) => void;
+  onScrollSpeedChanged?: (speed: number) => void;
+  onChapterProgress?: (spineIndex: number, chapterFraction: number) => void;
+  onChapterTransition?: (spineIndex: number) => void;
+  onTapPause?: () => void;
+  onTapResume?: () => void;
+  onPeekBack?: () => void;
+  swipeSpeedAdjust?: boolean;
+  onSwipeSpeedAdjust?: (delta: number) => void;
 }
 
 export default function EbookReader({
@@ -42,6 +50,14 @@ export default function EbookReader({
   scrollSpeed,
   onAutoScrollEnd,
   onLog,
+  onScrollSpeedChanged,
+  onChapterProgress,
+  onChapterTransition,
+  onTapPause,
+  onTapResume,
+  onPeekBack,
+  swipeSpeedAdjust,
+  onSwipeSpeedAdjust,
 }: Props) {
   switch (format) {
     case 'epub':
@@ -62,6 +78,14 @@ export default function EbookReader({
           scrollSpeed={scrollSpeed}
           onAutoScrollEnd={onAutoScrollEnd}
           onLog={onLog}
+          onScrollSpeedChanged={onScrollSpeedChanged}
+          onChapterProgress={onChapterProgress}
+          onChapterTransition={onChapterTransition}
+          onTapPause={onTapPause}
+          onTapResume={onTapResume}
+          onPeekBack={onPeekBack}
+          swipeSpeedAdjust={swipeSpeedAdjust}
+          onSwipeSpeedAdjust={onSwipeSpeedAdjust}
         />
       );
     case 'pdf':
