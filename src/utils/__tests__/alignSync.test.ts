@@ -6,7 +6,7 @@ import {
   lookupByChapter,
   type ChapterText,
 } from '../alignSync';
-import type { SyncPoint } from '../../types';
+import type { PositionAnchor } from '../../types';
 import type { TranscribeSegment } from '../transcribeAudio';
 
 // ─── helpers ────────────────────────────────────────────────────────────────
@@ -15,8 +15,8 @@ function seg(t0Ms: number, t1Ms: number, text: string): TranscribeSegment {
   return { t0Ms, t1Ms, text };
 }
 
-function pt(audioMs: number, chapterIndex: number): SyncPoint {
-  return { audioMs, fileIndex: 0, fileSeconds: 0, chapterIndex, withinChapterFraction: 0 };
+function pt(audioMs: number, chapterIndex: number): PositionAnchor {
+  return { audioMs, fileIndex: 0, fileSeconds: 0, chapterIndex, withinChapterFraction: 0, source: 'proportional' };
 }
 
 // ─── buildSyncPoints ─────────────────────────────────────────────────────────
@@ -125,7 +125,7 @@ describe('fillFilePositions', () => {
 // ─── lookupByAudio ───────────────────────────────────────────────────────────
 
 describe('lookupByAudio', () => {
-  const points: SyncPoint[] = [
+  const points: PositionAnchor[] = [
     pt(0, 0),
     pt(30_000, 1),
     pt(60_000, 2),
@@ -156,7 +156,7 @@ describe('lookupByAudio', () => {
 // ─── lookupByChapter ─────────────────────────────────────────────────────────
 
 describe('lookupByChapter', () => {
-  const points: SyncPoint[] = [pt(0, 0), pt(30_000, 2), pt(60_000, 4)];
+  const points: PositionAnchor[] = [pt(0, 0), pt(30_000, 2), pt(60_000, 4)];
 
   it('returns null for empty array', () => {
     expect(lookupByChapter([], 1)).toBeNull();

@@ -16,7 +16,7 @@ interface LibraryState {
   updateAudioPosition: (id: string, fileIndex: number, positionSeconds: number) => void;
   updateAudioFileDuration: (id: string, fileIndex: number, durationSeconds: number) => void;
   setLastMode: (id: string, mode: ReaderMode) => void;
-  setSyncMapCreatedAt: (id: string, createdAt: number | undefined) => void;
+  setPositionMapCreatedAt: (id: string, createdAt: number | undefined) => void;
   getBook: (id: string) => Book | undefined;
 }
 
@@ -115,11 +115,11 @@ export const useLibraryStore = create<LibraryState>()(
         }));
       },
 
-      setSyncMapCreatedAt: (id, createdAt) => {
+      setPositionMapCreatedAt: (id, createdAt) => {
         set((state) => ({
           books: state.books.map((b) =>
             b.id === id
-              ? { ...b, session: { ...b.session, syncMapCreatedAt: createdAt } }
+              ? { ...b, session: { ...b.session, positionMapCreatedAt: createdAt } }
               : b,
           ),
         }));
