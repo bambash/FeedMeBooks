@@ -16,8 +16,8 @@ import AudioPlayer from '../../src/components/AudioPlayer';
 import EbookReader from '../../src/components/EbookReader';
 import { useLibraryStore } from '../../src/store/libraryStore';
 import { colors, radius, spacing, typography } from '../../src/theme';
-import type { EbookPosition, PositionMap, ReaderMode, SyncMap } from '../../src/types';
-import { buildSyncPoints, buildSyncPointsFromTranscripts, createProportionalAnchors, fillFilePositions, interpolateAudioMs, interpolateCanonical, addConfirmedAnchor, type ChapterText } from '../../src/utils/alignSync';
+import type { EbookPosition, PositionAnchor, PositionMap, ReaderMode, SyncMap } from '../../src/types';
+import { buildSyncPoints, buildSyncPointsFromTranscripts, createInitialAnchors, fillFilePositions, interpolateAudioMs, interpolateCanonical, addConfirmedAnchor, type Anchor, type ChapterText } from '../../src/utils/alignSync';
 import { downloadModel, isModelDownloaded, releaseWhisperContext, transcribeFile } from '../../src/utils/transcribeAudio';
 import { deleteSyncMap, loadSyncMap, saveSyncMap } from '../../src/utils/syncMapStorage';
 import { deletePositionMap, loadPositionMap, savePositionMap } from '../../src/utils/positionMapStorage';
@@ -433,7 +433,7 @@ export default function ReaderScreen() {
       if (!map) {
         const chapters = chaptersRef.current;
         if (chapters.length > 0 && totalAudioMs > 0) {
-          const anchors = createProportionalAnchors(chapters, totalAudioMs);
+          const anchors = createInitialAnchors(chapters, totalAudioMs) as PositionAnchor[];
           if (anchors.length) {
             map = { bookId: b.id, anchors, createdAt: Date.now(), totalAudioMs };
             await savePositionMap(map);
@@ -529,7 +529,7 @@ export default function ReaderScreen() {
               ` frac=${canonicalWithinChapterFractionRef.current.toFixed(3)}`,
             );
           } else if (positionMap?.anchors.length) {
-            const canonical = interpolateCanonical(positionMap.anchors, currentAudioMs);
+            const canonical = interpolateCanonical(positionMap.anchors as Anchor[], currentAudioMs);
             if (canonical) {
               const chLabel = chaptersRef.current.find((c) => c.chapterIndex === canonical.chapterIndex)?.label;
               setSyncBanner({ targetMode: 'ebook', percentage: pct, targetChapterIndex: canonical.chapterIndex, targetChapterLabel: chLabel });
@@ -547,7 +547,7 @@ export default function ReaderScreen() {
 
             // Use canonical position + PositionMap to compute audio target
             if (positionMap?.anchors.length && canonicalCh >= 0) {
-              const targetMs = interpolateAudioMs(positionMap.anchors, canonicalCh, canonicalFrac);
+              const targetMs = interpolateAudioMs(positionMap.anchors as Anchor[], canonicalCh, canonicalFrac);
               if (targetMs != null) {
                 const { targetFileIndex, targetSeconds } = audioMsToFilePosition(b, targetMs);
                 pendingSwitchAudioMsRef.current = targetMs;
@@ -613,8 +613,8 @@ export default function ReaderScreen() {
     const canonicalFrac = canonicalWithinChapterFractionRef.current;
 
     if (map && audioMs > 0 && canonicalCh >= 0) {
-      const newAnchors = addConfirmedAnchor(map.anchors, audioMs, canonicalCh, canonicalFrac);
-      const updated: PositionMap = { ...map, anchors: newAnchors };
+      const newAnchors = addConfirmedAnchor(map.anchors as Anchor[], { audioMs, chapterIndex: canonicalCh });
+      const updated: PositionMap = { ...map, anchors: newAnchors as PositionAnchor[] };
       setPositionMap(updated);
       savePositionMap(updated);
       handleLog(
@@ -675,10 +675,10 @@ export default function ReaderScreen() {
 
       const map = positionMap;
       if (map?.anchors.length) {
-        const canonical = interpolateCanonical(map.anchors, audioMs);
+        const canonical = interpolateCanonical(map.anchors as Anchor[], audioMs);
         if (canonical) {
           canonicalChapterIndexRef.current = canonical.chapterIndex;
-          canonicalWithinChapterFractionRef.current = canonical.withinChapterFraction;
+          canonicalWithinChapterFractionRef.current = canonical.fraction;
         }
       }
     },
