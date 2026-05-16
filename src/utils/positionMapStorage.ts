@@ -6,15 +6,7 @@
  */
 
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import type { Anchor } from './alignSync';
-
-export interface PositionMap {
-  bookId: string;
-  createdAt: number; // unix ms
-  totalAudioMs: number;
-  /** Confirmed anchors sorted ascending by audioMs */
-  anchors: Anchor[];
-}
+import type { PositionMap } from '../types';
 
 const key = (bookId: string) => `feedmebooks:positionmap:${bookId}`;
 
