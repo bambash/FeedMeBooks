@@ -179,6 +179,8 @@ export default function ReaderScreen() {
           map = {
             bookId: book.id,
             anchors: legacy.points.map((p) => ({ ...p })),
+            createdAt: legacy.createdAt,
+            totalAudioMs: legacy.totalAudioMs,
             migratedFromSyncMap: true,
           };
           await savePositionMap(map);
@@ -373,6 +375,8 @@ export default function ReaderScreen() {
         const posMap: PositionMap = {
           bookId: b.id,
           anchors: map.points.map((p) => ({ ...p })),
+          createdAt: Date.now(),
+          totalAudioMs: map.totalAudioMs,
         };
         await savePositionMap(posMap);
         setPositionMap(posMap);
@@ -417,6 +421,8 @@ export default function ReaderScreen() {
           map = {
             bookId: b.id,
             anchors: legacy.points.map((p) => ({ ...p })),
+            createdAt: legacy.createdAt,
+            totalAudioMs: legacy.totalAudioMs,
             migratedFromSyncMap: true,
           };
           await savePositionMap(map);
@@ -429,7 +435,7 @@ export default function ReaderScreen() {
         if (chapters.length > 0 && totalAudioMs > 0) {
           const anchors = createProportionalAnchors(chapters, totalAudioMs);
           if (anchors.length) {
-            map = { bookId: b.id, anchors };
+            map = { bookId: b.id, anchors, createdAt: Date.now(), totalAudioMs };
             await savePositionMap(map);
           }
         }
