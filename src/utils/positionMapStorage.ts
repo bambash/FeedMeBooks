@@ -1,3 +1,10 @@
+/**
+ * Persistent storage for PositionMap objects.
+ *
+ * Stored separately from the main library store (which uses Zustand/persist)
+ * to avoid bloating the primary storage key with potentially large JSON blobs.
+ */
+
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import type { PositionMap } from '../types';
 

@@ -28,6 +28,14 @@ export interface ChapterText {
   label?: string;
 }
 
+/** A confirmed alignment point between audio time and book position */
+export interface Anchor {
+  /** Milliseconds from the start of the whole audiobook */
+  audioMs: number;
+  /** epub.js spine chapter index (0-based) */
+  chapterIndex: number;
+}
+
 // ─── Core alignment ──────────────────────────────────────────────────────────
 
 /**
@@ -281,5 +289,136 @@ export function findChapterByWindowText(
   }
 
   return bestScore >= 0.25 ? bestChapter : null;
+}
+
+// ─── Position-map utilities ──────────────────────────────────────────────────
+
+/**
+ * Create proportional anchors with equal chapter allocation.
+ *
+ * Each content chapter (text.length >= 500) gets one anchor placed at a point
+ * proportional to its index in the chapter list. This assumes chapters are
+ * roughly equal in narrated duration.
+ */
+export function createInitialAnchors(
+  chapters: ChapterText[],
+  totalAudioMs: number,
+): Anchor[] {
+  if (!totalAudioMs || !chapters.length) return [];
+
+  const contentChapters = chapters.filter((c) => c.text.trim().length >= 500);
+  if (!contentChapters.length) return [];
+
+  const n = contentChapters.length;
+  return contentChapters.map((ch, i) => ({
+    audioMs: Math.round((i / n) * totalAudioMs),
+    chapterIndex: ch.chapterIndex,
+  }));
+}
+
+/**
+ * Insert a confirmed anchor into a sorted list, replacing any existing anchor
+ * at the same audioMs. The returned array is sorted ascending by audioMs.
+ */
+export function addConfirmedAnchor(anchors: Anchor[], newAnchor: Anchor): Anchor[] {
+  const idx = anchors.findIndex((a) => a.audioMs === newAnchor.audioMs);
+
+  if (idx !== -1) {
+    const next = [...anchors];
+    next[idx] = newAnchor;
+    return next.sort((a, b) => a.audioMs - b.audioMs);
+  }
+
+  return [...anchors, newAnchor].sort((a, b) => a.audioMs - b.audioMs);
+}
+
+/**
+ * Given an audio time (ms), use binary search + linear interpolation over the
+ * anchor list to estimate the corresponding canonical book position.
+ *
+ * Returns { chapterIndex, fraction } or null if anchors is empty.
+ */
+export function interpolateCanonical(
+  anchors: Anchor[],
+  audioMs: number,
+): { chapterIndex: number; fraction: number } | null {
+  if (!anchors.length) return null;
+
+  // Binary search for the rightmost anchor with audioMs <= query
+  let lo = 0;
+  let hi = anchors.length - 1;
+  while (lo < hi) {
+    const mid = (lo + hi + 1) >> 1;
+    if (anchors[mid].audioMs <= audioMs) lo = mid;
+    else hi = mid - 1;
+  }
+
+  const left = anchors[lo];
+
+  // Beyond the last anchor — return it with fraction 0
+  if (lo >= anchors.length - 1) {
+    return { chapterIndex: left.chapterIndex, fraction: 0 };
+  }
+
+  // Before the first anchor — return it with fraction 0
+  if (audioMs < anchors[0].audioMs) {
+    return { chapterIndex: anchors[0].chapterIndex, fraction: 0 };
+  }
+
+  const right = anchors[lo + 1];
+  const range = right.audioMs - left.audioMs;
+  if (range === 0) {
+    return { chapterIndex: left.chapterIndex, fraction: 0 };
+  }
+
+  const t = Math.max(0, Math.min(1, (audioMs - left.audioMs) / range));
+  const canonical = left.chapterIndex + t * (right.chapterIndex - left.chapterIndex);
+  const chapterIndex = Math.floor(canonical);
+  const fraction = canonical - chapterIndex;
+
+  return { chapterIndex, fraction };
+}
+
+/**
+ * Reverse of interpolateCanonical: given a canonical book position
+ * (chapterIndex + fraction), estimate the corresponding audio time (ms).
+ *
+ * Returns the estimated audioMs or null if anchors is empty.
+ */
+export function interpolateAudioMs(
+  anchors: Anchor[],
+  chapterIndex: number,
+  fraction: number,
+): number | null {
+  if (!anchors.length) return null;
+
+  const canonical = chapterIndex + fraction;
+
+  // Find the rightmost anchor whose chapterIndex <= canonical
+  let leftIdx = -1;
+  for (let i = 0; i < anchors.length; i++) {
+    if (anchors[i].chapterIndex <= canonical) {
+      leftIdx = i;
+    }
+  }
+
+  // Canonical is before all anchors
+  if (leftIdx === -1) {
+    return anchors[0].audioMs;
+  }
+
+  // Canonical is at or past the last anchor — no right neighbour to interpolate with
+  if (leftIdx >= anchors.length - 1) {
+    return anchors[leftIdx].audioMs;
+  }
+
+  const rightIdx = leftIdx + 1;
+  const left = anchors[leftIdx];
+  const right = anchors[rightIdx];
+  const chapRange = right.chapterIndex - left.chapterIndex;
+  if (chapRange === 0) return left.audioMs;
+
+  const t = (canonical - left.chapterIndex) / chapRange;
+  return Math.round(left.audioMs + t * (right.audioMs - left.audioMs));
 }
 
