@@ -75,7 +75,7 @@ export function buildSyncPoints(
   const totalChars = useEqual ? 0 : contentChapters.reduce((sum, c) => sum + c.text.length, 0);
   if (!useEqual && !totalChars) return [];
 
-  const points: SyncPoint[] = [];
+  const points: PositionAnchor[] = [];
   let cumChars = 0;
 
   for (let i = 0; i < n; i++) {
@@ -137,7 +137,7 @@ export function buildSyncPointsFromTranscripts(
   // Half-window: ±30% of chapter count, but never less than 3 either side
   const halfWindow = Math.max(3, Math.ceil(n * 0.3));
 
-  const points: SyncPoint[] = [];
+  const points: PositionAnchor[] = [];
   let cumulativeMs = 0;
   let lastOrdinal = 0; // ordinal position in contentChapters array (monotonic)
 
