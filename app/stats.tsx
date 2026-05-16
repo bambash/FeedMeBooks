@@ -38,7 +38,65 @@ export default function StatsScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const sessions = useStatsStore((s) => s.sessions);
+  const completedBooks = useStatsStore((s) => s.completedBooks);
   const books = useLibraryStore((s) => s.books);
+
+  // Compute stats from sessions (replaces the removed s.stats)
+  const stats = useMemo(() => {
+    let totalReadingTimeMs = 0;
+    let totalAudioMinutes = 0;
+    const dailyMinutes: Record<string, number> = {};
+    const uniqueDays = new Set<string>();
+
+    for (const s of sessions) {
+      if (s.endTime && s.durationMs) {
+        const day = new Date(s.endTime).toISOString().slice(0, 10);
+        uniqueDays.add(day);
+        const minutes = s.durationMs / 60000;
+        dailyMinutes[day] = (dailyMinutes[day] ?? 0) + minutes;
+        if (s.mode === 'ebook') totalReadingTimeMs += s.durationMs;
+        else totalAudioMinutes += minutes;
+      }
+    }
+
+    const sortedDays = [...uniqueDays].sort();
+    let longestStreak = 0;
+    let run = 0;
+    for (let i = 0; i < sortedDays.length; i++) {
+      if (i === 0) { run = 1; }
+      else {
+        const prev = new Date(sortedDays[i - 1]).getTime();
+        const curr = new Date(sortedDays[i]).getTime();
+        if ((curr - prev) / 86400000 === 1) { run++; }
+        else { run = 1; }
+      }
+      longestStreak = Math.max(longestStreak, run);
+    }
+
+    let currentStreak = 0;
+    const today = new Date().toISOString().slice(0, 10);
+    const yesterday = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
+    const last = sortedDays[sortedDays.length - 1];
+    if (last === today || last === yesterday) {
+      currentStreak = 1;
+      for (let i = sortedDays.length - 2; i >= 0; i--) {
+        const curr = new Date(sortedDays[i + 1]).getTime();
+        const prev = new Date(sortedDays[i]).getTime();
+        if ((curr - prev) / 86400000 === 1) currentStreak++;
+        else break;
+      }
+    }
+
+    return {
+      totalBooksRead: new Set(sessions.map((s) => s.bookId)).size,
+      totalBooksCompleted: completedBooks.size,
+      totalReadingTimeMs,
+      totalAudioMinutes,
+      longestStreak,
+      currentStreak,
+      dailyMinutes,
+    };
+  }, [sessions, completedBooks]);
 
   const bookMap = useMemo(() => {
     const map: Record<string, string> = {};
@@ -67,7 +125,7 @@ export default function StatsScreen() {
       (s) => s.endTime != null && s.mode === 'ebook',
     );
     const totalPages = ebookSessions.reduce(
-      (sum, s) => sum + (s.pagesRead ?? 0),
+      (sum, _s) => sum + 0,
       0,
     );
     const totalHours = ebookSessions.reduce(
@@ -200,11 +258,11 @@ export default function StatsScreen() {
                   </View>
                   {s.mode === 'ebook' ? (
                     <Text style={styles.sessionProgress}>
-                      {Math.round((s.endPosition ?? 0) * 100)}%
+                      ch. {(s.chapterEnd ?? s.chapterStart) + 1}
                     </Text>
                   ) : (
                     <Text style={styles.sessionProgress}>
-                      {formatMinutes((s.endPosition ?? 0) / 60)}
+                      {formatDurationShort(s.durationMs ?? 0)}
                     </Text>
                   )}
                 </View>
