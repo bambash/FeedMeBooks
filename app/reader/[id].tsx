@@ -4,6 +4,8 @@ import { useLocalSearchParams, useRouter } from 'expo-router';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   Animated,
+  AppState,
+  AppStateStatus,
   FlatList,
   Modal,
   Pressable,
@@ -15,6 +17,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import AudioPlayer from '../../src/components/AudioPlayer';
 import EbookReader from '../../src/components/EbookReader';
 import { useLibraryStore } from '../../src/store/libraryStore';
+import { useStatsStore } from '../../src/store/statsStore';
 import { colors, radius, spacing, typography } from '../../src/theme';
 import type { EbookPosition, ReaderMode, SyncMap } from '../../src/types';
 import { buildSyncPoints, buildSyncPointsFromTranscripts, fillFilePositions, findChapterByWindowText, lookupByAudio, lookupByChapter, type ChapterText } from '../../src/utils/alignSync';
@@ -53,6 +56,7 @@ export default function ReaderScreen() {
 
   const { getBook, updateEbookPosition, updateAudioPosition, updateAudioFileDuration, setLastMode, setSyncMapCreatedAt } =
     useLibraryStore();
+  const { startSession, endSession, markBookCompleted } = useStatsStore();
   const book = getBook(id);
 
   const [mode, setMode] = useState<ReaderMode>(book?.session.lastMode ?? 'ebook');
@@ -74,6 +78,7 @@ export default function ReaderScreen() {
   const [epubGoNextRequest, setEpubGoNextRequest] = useState(0);
   const [epubGoPrevRequest, setEpubGoPrevRequest] = useState(0);
   const logsRef = useRef<string[]>([]);
+  const sessionRef = useRef<string | null>(null);
 
   // Sync map (word-level audio↔ebook alignment)
   const [syncMap, setSyncMap] = useState<SyncMap | null>(null);
@@ -147,6 +152,41 @@ export default function ReaderScreen() {
       if (texts?.length) chaptersRef.current = texts;
     });
   }, [book?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Session tracking: start on mount, end on unmount
+  useEffect(() => {
+    if (!book) return;
+    const chapterIndex = book.session.ebookPosition.spineIndex ?? -1;
+    const sessionId = startSession(book.id, mode, chapterIndex);
+    sessionRef.current = sessionId;
+    return () => {
+      if (sessionRef.current) {
+        const endChapter = bookRef.current?.session.ebookPosition.spineIndex ?? -1;
+        endSession(sessionRef.current, endChapter);
+        sessionRef.current = null;
+      }
+    };
+  }, [book?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // AppState: end session on background, restart on foreground
+  useEffect(() => {
+    const handleChange = (nextState: AppStateStatus) => {
+      if (nextState === 'background' || nextState === 'inactive') {
+        if (sessionRef.current) {
+          const endChapter = bookRef.current?.session.ebookPosition.spineIndex ?? -1;
+          endSession(sessionRef.current, endChapter);
+          sessionRef.current = null;
+        }
+      } else if (nextState === 'active') {
+        if (!sessionRef.current && bookRef.current) {
+          const chapterIndex = bookRef.current.session.ebookPosition.spineIndex ?? -1;
+          sessionRef.current = startSession(bookRef.current.id, mode, chapterIndex);
+        }
+      }
+    };
+    const sub = AppState.addEventListener('change', handleChange);
+    return () => sub.remove();
+  }, [mode, startSession, endSession]);
 
   const handleLog = useCallback((message: string) => {
     const ts = new Date().toISOString().slice(11, 23);
@@ -515,9 +555,16 @@ export default function ReaderScreen() {
 
   const handleEbookPositionChange = useCallback(
     (position: Partial<EbookPosition>) => {
-      if (book) updateEbookPosition(book.id, position);
+      if (!book) return;
+      updateEbookPosition(book.id, position);
+      if (
+        position.percentage !== undefined &&
+        position.percentage > 0.95
+      ) {
+        markBookCompleted(book.id);
+      }
     },
-    [book, updateEbookPosition],
+    [book, updateEbookPosition, markBookCompleted],
   );
 
   const handleAudioPositionChange = useCallback(
