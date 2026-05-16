@@ -15,6 +15,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import AudioPlayer from '../../src/components/AudioPlayer';
 import EbookReader from '../../src/components/EbookReader';
 import { useLibraryStore } from '../../src/store/libraryStore';
+import { useStatsStore } from '../../src/store/statsStore';
 import { colors, radius, spacing, typography } from '../../src/theme';
 import type { EbookPosition, ReaderMode, SyncMap } from '../../src/types';
 import { buildSyncPoints, buildSyncPointsFromTranscripts, fillFilePositions, findChapterByWindowText, lookupByAudio, lookupByChapter, type ChapterText } from '../../src/utils/alignSync';
@@ -98,6 +99,67 @@ export default function ReaderScreen() {
   useEffect(() => {
     if (book) setLastMode(book.id, mode);
   }, [mode]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── Session tracking ────────────────────────────────────────
+  const { startSession, endSession } = useStatsStore();
+  const sessionIdRef = useRef<string | null>(null);
+  const sessionStartPosRef = useRef<number>(0);
+  const sessionStartPageRef = useRef<number | undefined>(undefined);
+
+  useEffect(() => {
+    if (!book) return;
+
+    // End previous session if any
+    if (sessionIdRef.current) {
+      const b = bookRef.current ?? book;
+      const endPos =
+        mode === 'ebook'
+          ? b.session.ebookPosition.percentage
+          : b.session.audioFileDurations
+              .slice(0, b.session.audioFileIndex)
+              .reduce((s, d) => s + (d ?? 0), 0) + b.session.audioPosition;
+      endSession(
+        sessionIdRef.current,
+        endPos,
+        mode,
+        b.session.ebookPosition.page,
+        sessionStartPageRef.current,
+      );
+    }
+
+    // Compute start position for new session
+    const startPos =
+      mode === 'ebook'
+        ? book.session.ebookPosition.percentage
+        : book.session.audioFileDurations
+            .slice(0, book.session.audioFileIndex)
+            .reduce((s, d) => s + (d ?? 0), 0) + book.session.audioPosition;
+
+    sessionStartPosRef.current = startPos;
+    sessionStartPageRef.current = book.session.ebookPosition.page;
+    sessionIdRef.current = startSession(book.id, mode, startPos);
+
+    return () => {
+      // End session on unmount
+      if (sessionIdRef.current) {
+        const b = bookRef.current ?? book;
+        const endPos =
+          mode === 'ebook'
+            ? b.session.ebookPosition.percentage
+            : b.session.audioFileDurations
+                .slice(0, b.session.audioFileIndex)
+                .reduce((s, d) => s + (d ?? 0), 0) + b.session.audioPosition;
+        endSession(
+          sessionIdRef.current,
+          endPos,
+          mode,
+          b.session.ebookPosition.page,
+          sessionStartPageRef.current,
+        );
+        sessionIdRef.current = null;
+      }
+    };
+  }, [book?.id, mode]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Pre-scan durations for all audio tracks so the full book length is known
   // immediately, not just after each track is played.
