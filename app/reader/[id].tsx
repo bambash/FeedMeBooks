@@ -114,7 +114,6 @@ export default function ReaderScreen() {
   }, [mode]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Session tracking ────────────────────────────────────────
-  const { startSession, endSession } = useStatsStore();
   const sessionIdRef = useRef<string | null>(null);
   const sessionStartPosRef = useRef<number>(0);
   const sessionStartPageRef = useRef<number | undefined>(undefined);
@@ -134,9 +133,6 @@ export default function ReaderScreen() {
       endSession(
         sessionIdRef.current,
         endPos,
-        mode,
-        b.session.ebookPosition.page,
-        sessionStartPageRef.current,
       );
     }
 
@@ -165,9 +161,6 @@ export default function ReaderScreen() {
         endSession(
           sessionIdRef.current,
           endPos,
-          mode,
-          b.session.ebookPosition.page,
-          sessionStartPageRef.current,
         );
         sessionIdRef.current = null;
       }

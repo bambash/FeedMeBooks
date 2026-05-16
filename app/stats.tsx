@@ -37,7 +37,6 @@ const DAILY_GOAL_MINUTES = 30;
 export default function StatsScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
-  const stats = useStatsStore((s) => s.stats);
   const sessions = useStatsStore((s) => s.sessions);
   const books = useLibraryStore((s) => s.books);
 
@@ -51,7 +50,15 @@ export default function StatsScreen() {
     return new Date().toISOString().slice(0, 10);
   }, []);
 
-  const todayMinutes = stats.dailyMinutes[todayKey] ?? 0;
+  const todayMinutes = useMemo(() => {
+    return sessions
+      .filter((s) => {
+        if (s.endTime == null) return false;
+        const d = new Date(s.startTime).toISOString().slice(0, 10);
+        return d === todayKey;
+      })
+      .reduce((sum, s) => sum + (s.durationMs ?? 0), 0) / 60000;
+  }, [sessions, todayKey]);
   const goalProgress = Math.min(todayMinutes / DAILY_GOAL_MINUTES, 1);
 
   // Average reading pace: pages per hour (for PDF sessions that have pagesRead)
