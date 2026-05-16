@@ -15,7 +15,7 @@
  * chapters make relative scores indistinguishable.
  */
 
-import type { PositionAnchor } from '../types';
+import type { PositionAnchor, SyncPoint } from '../types';
 import type { TranscribeSegment } from './transcribeAudio';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
