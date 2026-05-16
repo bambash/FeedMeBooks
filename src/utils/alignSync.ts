@@ -2,7 +2,7 @@
  * Audio↔ebook alignment.
  *
  * Takes word-level Whisper transcript segments and epub chapter texts,
- * produces a SyncMap: a sorted list of (audioMs → chapterIndex) points.
+ * produces a PositionMap: a sorted list of (audioMs → chapterIndex) anchors.
  *
  * Algorithm: proportional text-length mapping.
  * Each non-empty chapter is assumed to occupy an audio time range
@@ -15,7 +15,7 @@
  * chapters make relative scores indistinguishable.
  */
 
-import type { SyncPoint } from '../types';
+import type { PositionAnchor, SyncPoint } from '../types';
 import type { TranscribeSegment } from './transcribeAudio';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -61,7 +61,7 @@ export function buildSyncPoints(
   chapters: ChapterText[],
   totalMs: number,
   opts?: { equalAllocation?: boolean },
-): SyncPoint[] {
+): PositionAnchor[] {
   // Fall back to segment-derived duration if caller could not supply totalMs
   const effectiveTotalMs =
     totalMs > 0
@@ -83,7 +83,7 @@ export function buildSyncPoints(
   const totalChars = useEqual ? 0 : contentChapters.reduce((sum, c) => sum + c.text.length, 0);
   if (!useEqual && !totalChars) return [];
 
-  const points: SyncPoint[] = [];
+  const points: PositionAnchor[] = [];
   let cumChars = 0;
 
   for (let i = 0; i < n; i++) {
@@ -97,6 +97,7 @@ export function buildSyncPoints(
       fileSeconds: 0,
       chapterIndex: chapter.chapterIndex,
       withinChapterFraction: 0,
+      source: 'proportional' as const,
     });
     if (!useEqual) cumChars += chapter.text.length;
   }
@@ -132,7 +133,7 @@ export function buildSyncPointsFromTranscripts(
   fileTranscripts: string[],
   fileDurationsMs: number[],
   chapters: ChapterText[],
-): SyncPoint[] {
+): PositionAnchor[] {
   const contentChapters = chapters.filter((c) => c.text.trim().length >= 500);
   if (!contentChapters.length || !fileTranscripts.length) return [];
 
@@ -144,7 +145,7 @@ export function buildSyncPointsFromTranscripts(
   // Half-window: ±30% of chapter count, but never less than 3 either side
   const halfWindow = Math.max(3, Math.ceil(n * 0.3));
 
-  const points: SyncPoint[] = [];
+  const points: PositionAnchor[] = [];
   let cumulativeMs = 0;
   let lastOrdinal = 0; // ordinal position in contentChapters array (monotonic)
 
@@ -194,6 +195,7 @@ export function buildSyncPointsFromTranscripts(
       fileSeconds: 0,
       chapterIndex: contentChapters[lastOrdinal].chapterIndex,
       withinChapterFraction: 0,
+      source: 'transcript' as const,
     });
 
     cumulativeMs += durationMs;
@@ -207,9 +209,9 @@ export function buildSyncPointsFromTranscripts(
  * @param fileDurationsMs  Duration (ms) of each audio file in order
  */
 export function fillFilePositions(
-  points: SyncPoint[],
+  points: PositionAnchor[],
   fileDurationsMs: number[],
-): SyncPoint[] {
+): PositionAnchor[] {
   return points.map((pt) => {
     let cum = 0;
     for (let i = 0; i < fileDurationsMs.length; i++) {
@@ -231,7 +233,7 @@ export function fillFilePositions(
  * Return the SyncPoint whose audioMs is ≤ the given time (binary search).
  * Returns null if points is empty.
  */
-export function lookupByAudio(points: SyncPoint[], audioMs: number): SyncPoint | null {
+export function lookupByAudio(points: PositionAnchor[], audioMs: number): PositionAnchor | null {
   if (!points.length) return null;
   let lo = 0;
   let hi = points.length - 1;
@@ -247,7 +249,7 @@ export function lookupByAudio(points: SyncPoint[], audioMs: number): SyncPoint |
  * Return the first SyncPoint whose chapterIndex >= the given index.
  * Useful for ebook→audio sync.
  */
-export function lookupByChapter(points: SyncPoint[], chapterIndex: number): SyncPoint | null {
+export function lookupByChapter(points: PositionAnchor[], chapterIndex: number): PositionAnchor | null {
   return points.find((p) => p.chapterIndex >= chapterIndex) ?? points[points.length - 1] ?? null;
 }
 

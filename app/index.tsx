@@ -7,6 +7,7 @@ import {
   Text,
   View,
 } from 'react-native';
+import { useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import AddBookModal from '../src/components/AddBookModal';
 import BookCard from '../src/components/BookCard';
@@ -19,6 +20,7 @@ export default function LibraryScreen() {
   const { books, removeBook } = useLibraryStore();
   const [showAddModal, setShowAddModal] = useState(false);
   const insets = useSafeAreaInsets();
+  const router = useRouter();
 
   const handleLongPress = useCallback(
     (book: Book) => {
@@ -66,12 +68,20 @@ export default function LibraryScreen() {
               : `${books.length} book${books.length !== 1 ? 's' : ''}`}
           </Text>
         </View>
-        <Pressable
-          style={({ pressed }) => [styles.addBtn, pressed && { opacity: 0.8 }]}
-          onPress={() => setShowAddModal(true)}
-        >
-          <Text style={styles.addBtnText}>+ Add Book</Text>
-        </Pressable>
+        <View style={styles.headerActions}>
+          <Pressable
+            style={({ pressed }) => [styles.statsBtn, pressed && { opacity: 0.8 }]}
+            onPress={() => router.push('/stats')}
+          >
+            <Text style={styles.statsBtnText}>📊</Text>
+          </Pressable>
+          <Pressable
+            style={({ pressed }) => [styles.addBtn, pressed && { opacity: 0.8 }]}
+            onPress={() => setShowAddModal(true)}
+          >
+            <Text style={styles.addBtnText}>+ Add Book</Text>
+          </Pressable>
+        </View>
       </View>
 
       {/* Book grid */}
@@ -139,6 +149,22 @@ const styles = StyleSheet.create({
     ...typography.small,
     color: colors.textMuted,
     marginTop: 2,
+  },
+  headerActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+  },
+  statsBtn: {
+    backgroundColor: colors.surfaceHigh,
+    borderRadius: radius.full,
+    width: 36,
+    height: 36,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  statsBtnText: {
+    fontSize: 16,
   },
   addBtn: {
     backgroundColor: colors.primary,
