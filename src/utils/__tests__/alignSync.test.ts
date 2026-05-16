@@ -13,145 +13,6 @@ import {
 } from '../alignSync';
 import type { TranscribeSegment } from '../transcribeAudio';
 
-// ─── Inline test doubles for Phase 2a functions ──────────────────────────
-// Replace with real imports from ../alignSync once NS-16 (Phase 2a+2b) lands:
-//
-//   import {
-//     createInitialAnchors,
-//     addConfirmedAnchor,
-//     interpolateCanonical,
-//     interpolateAudioMs,
-//   } from '../alignSync';
-//
-// These doubles match the spec so tests are independently verifiable.
-
-const MIN_CHAPTER_CHARS = 500;
-
-function createInitialAnchors(
-  chapters: { chapterIndex: number; text: string }[],
-  totalAudioMs: number,
-): PositionAnchor[] {
-  const substantive = chapters.filter((c) => c.text.length >= MIN_CHAPTER_CHARS);
-  if (substantive.length === 0) return [];
-  const sliceMs = totalAudioMs / substantive.length;
-  return substantive.map((c, i) => ({
-    audioMs: i * sliceMs,
-    chapterIndex: c.chapterIndex,
-    withinChapterFraction: 0,
-    source: 'proportional' as const,
-  }));
-}
-
-function addConfirmedAnchor(
-  anchors: PositionAnchor[],
-  newAnchor: PositionAnchor,
-): PositionAnchor[] {
-  // Deduplication
-  const dup = anchors.find(
-    (a) =>
-      a.audioMs === newAnchor.audioMs &&
-      a.chapterIndex === newAnchor.chapterIndex &&
-      a.source === newAnchor.source,
-  );
-  if (dup) return anchors;
-
-  // Replace anchor at same chapterIndex (if proportional → confirmed upgrade)
-  const sameChIdx = anchors.findIndex((a) => a.chapterIndex === newAnchor.chapterIndex);
-  // Replace anchor at same audioMs
-  const sameMsIdx = anchors.findIndex((a) => a.audioMs === newAnchor.audioMs);
-  const replaceIdx = sameChIdx >= 0 ? sameChIdx : sameMsIdx >= 0 ? sameMsIdx : -1;
-
-  if (replaceIdx >= 0) {
-    const result = [...anchors];
-    result[replaceIdx] = newAnchor;
-    return result;
-  }
-
-  // Insert maintaining sort order
-  const insertAt = anchors.findIndex((a) => a.audioMs > newAnchor.audioMs);
-  if (insertAt === -1) return [...anchors, newAnchor];
-  return [...anchors.slice(0, insertAt), newAnchor, ...anchors.slice(insertAt)];
-}
-
-function interpolateCanonical(
-  anchors: PositionAnchor[],
-  audioMs: number,
-): { chapterIndex: number; withinChapterFraction: number } | null {
-  if (anchors.length === 0) return null;
-  if (anchors.length === 1) {
-    return {
-      chapterIndex: anchors[0].chapterIndex,
-      withinChapterFraction: 0,
-    };
-  }
-
-  // Clamp to first
-  if (audioMs <= anchors[0].audioMs) {
-    return { chapterIndex: anchors[0].chapterIndex, withinChapterFraction: 0 };
-  }
-  // Clamp to last
-  if (audioMs >= anchors[anchors.length - 1].audioMs) {
-    const last = anchors[anchors.length - 1];
-    return { chapterIndex: last.chapterIndex, withinChapterFraction: 0 };
-  }
-
-  // Binary search for surrounding anchors
-  let lo = 0;
-  let hi = anchors.length - 1;
-  while (lo < hi - 1) {
-    const mid = (lo + hi) >> 1;
-    if (anchors[mid].audioMs <= audioMs) lo = mid;
-    else hi = mid;
-  }
-
-  const left = anchors[lo];
-  const right = anchors[hi];
-  const range = right.audioMs - left.audioMs;
-  const t = range > 0 ? (audioMs - left.audioMs) / range : 0;
-
-  return {
-    chapterIndex: left.chapterIndex,
-    withinChapterFraction: Number.isFinite(t) ? t : 0,
-  };
-}
-
-function interpolateAudioMs(
-  anchors: PositionAnchor[],
-  chapterIndex: number,
-  withinChapterFraction: number,
-): number | null {
-  if (anchors.length === 0) return null;
-
-  const idx = anchors.findIndex((a) => a.chapterIndex === chapterIndex);
-
-  // No matching anchor
-  if (idx === -1) {
-    // Find surrounding anchors for interpolation
-    const before = [...anchors].reverse().find((a) => a.chapterIndex < chapterIndex);
-    const after = anchors.find((a) => a.chapterIndex > chapterIndex);
-    if (before && after) {
-      // Interpolate between before and after based on chapterIndex delta
-      const delta = after.chapterIndex - before.chapterIndex;
-      const t = (chapterIndex - before.chapterIndex) / delta;
-      return before.audioMs + t * (after.audioMs - before.audioMs);
-    }
-    // Past last
-    if (before && !after) return anchors[anchors.length - 1].audioMs;
-    return null;
-  }
-
-  // Exact chapter match with fraction 0
-  if (withinChapterFraction === 0) return anchors[idx].audioMs;
-
-  // Last anchor — clamp
-  if (idx === anchors.length - 1) return anchors[idx].audioMs;
-
-  // Interpolate between this anchor and next
-  const cur = anchors[idx];
-  const nxt = anchors[idx + 1];
-  return cur.audioMs + withinChapterFraction * (nxt.audioMs - cur.audioMs);
-}
-
 // ─── helpers ────────────────────────────────────────────────────────────────
 
 function seg(t0Ms: number, t1Ms: number, text: string): TranscribeSegment {
@@ -526,15 +387,18 @@ describe('interpolateCanonical', () => {
   });
 
   it('linear interpolation between two anchors — midpoint', () => {
+    // 45_000 ms is halfway between ch2 (30k) and ch4 (60k)
+    // canonical = 2 + 0.5*2 = 3, so chapterIndex=3 fraction=0
     const result = interpolateCanonical(anchors, 45_000);
-    expect(result!.chapterIndex).toBe(2);
-    expect(result!.fraction).toBeCloseTo(0.5, 5);
+    expect(result).toEqual({ chapterIndex: 3, fraction: 0 });
   });
 
   it('linear interpolation — closer to left anchor', () => {
+    // 40_000 ms is 1/3 between ch2 (30k) and ch4 (60k)
+    // canonical = 2 + (1/3)*2 = 2.667, so chapterIndex=2 fraction≈0.667
     const result = interpolateCanonical(anchors, 40_000);
     expect(result!.chapterIndex).toBe(2);
-    expect(result!.fraction).toBeCloseTo(1 / 3, 5);
+    expect(result!.fraction).toBeCloseTo(2 / 3, 5);
   });
 
   it('before first anchor returns first anchor values', () => {
@@ -577,18 +441,22 @@ describe('interpolateAudioMs', () => {
   });
 
   it('fraction > 0 interpolates between this and next anchor', () => {
+    // canonical = 2 + 0.5 = 2.5, t = (2.5-2)/(4-2) = 0.25
+    // audioMs = 30000 + 0.25*30000 = 37500
     const result = interpolateAudioMs(anchors, 2, 0.5);
-    expect(result).toBeCloseTo(45_000, 0);
+    expect(result).toBe(37_500);
   });
 
   it('fraction 0.25 interpolates correctly', () => {
+    // canonical = 2 + 0.25 = 2.25, t = (2.25-2)/(4-2) = 0.125
+    // audioMs = 30000 + 0.125*30000 = 33750
     const result = interpolateAudioMs(anchors, 2, 0.25);
-    expect(result).toBeCloseTo(37_500, 0);
+    expect(result).toBe(33_750);
   });
 
-  it('returns null when no matching chapter and no surrounding anchors', () => {
+  it('clamps to first anchor audioMs when canonical is before all anchors', () => {
     const singleAnchor = [anc(50_000, 5)];
-    expect(interpolateAudioMs(singleAnchor, 3, 0)).toBeNull();
+    expect(interpolateAudioMs(singleAnchor, 3, 0)).toBe(50_000);
   });
 
   it('past last returns last anchor audioMs', () => {
