@@ -111,3 +111,34 @@ export interface Book {
   session: BookSession;
   addedAt: number; // unix ms
 }
+
+export interface ReadingSession {
+  id: string;
+  bookId: string;
+  startTime: number; // unix ms
+  endTime?: number; // unix ms
+  durationMs?: number;
+  mode: 'ebook' | 'audio';
+  chapterStart: number; // spine index or -1
+  chapterEnd?: number;
+}
+
+export interface UserStats {
+  totalReadingMs: number;
+  totalListeningMs: number;
+  booksStarted: number;
+  booksCompleted: number;
+  sessionsByDate: Record<string, number>; // "YYYY-MM-DD" → session count
+  currentStreak: number;
+  longestStreak: number;
+  lastReadDate?: string; // "YYYY-MM-DD"
+}
+
+export interface BookStats {
+  bookId: string;
+  totalReadingMs: number;
+  totalListeningMs: number;
+  sessions: number;
+  lastPosition: number; // 0-1 percentage
+  completed: boolean;
+}

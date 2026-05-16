@@ -1,202 +1,206 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { create } from 'zustand';
 import { createJSONStorage, persist } from 'zustand/middleware';
-import type { ReaderMode } from '../types';
-import { DEFAULT_STATS, type ReadingSession, type UserStats } from '../types/stats';
+import type { BookStats, ReadingSession, UserStats } from '../types';
 
 const STORAGE_KEY = 'feedmebooks-stats';
 
-function uuid(): string {
-  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
-    const r = (Math.random() * 16) | 0;
-    return (c === 'x' ? r : (r & 0x3) | 0x8).toString(16);
-  });
+function generateId(): string {
+  return `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
 }
 
-function dateKey(ms: number): string {
-  return new Date(ms).toISOString().slice(0, 10);
+function todayStr(): string {
+  return new Date().toISOString().slice(0, 10);
+}
+
+function computeStreaks(uniqueDates: string[]): {
+  currentStreak: number;
+  longestStreak: number;
+} {
+  const sorted = [...uniqueDates].sort();
+  if (sorted.length === 0) return { currentStreak: 0, longestStreak: 0 };
+
+  // Longest streak — scan all dates
+  let longestStreak = 1;
+  let run = 1;
+  for (let i = 1; i < sorted.length; i++) {
+    const prev = new Date(sorted[i - 1]).getTime();
+    const curr = new Date(sorted[i]).getTime();
+    if ((curr - prev) / 86_400_000 === 1) {
+      run++;
+      longestStreak = Math.max(longestStreak, run);
+    } else {
+      run = 1;
+    }
+  }
+
+  // Current streak — count backwards from the most recent date, but only if
+  // the most recent date is today or yesterday
+  const last = sorted[sorted.length - 1];
+  const today = new Date().toISOString().slice(0, 10);
+  const yesterday = new Date(Date.now() - 86_400_000)
+    .toISOString()
+    .slice(0, 10);
+  if (last !== today && last !== yesterday) {
+    return { currentStreak: 0, longestStreak };
+  }
+
+  let currentStreak = 1;
+  for (let i = sorted.length - 2; i >= 0; i--) {
+    const curr = new Date(sorted[i + 1]).getTime();
+    const prev = new Date(sorted[i]).getTime();
+    if ((curr - prev) / 86_400_000 === 1) {
+      currentStreak++;
+    } else {
+      break;
+    }
+  }
+
+  return { currentStreak, longestStreak };
 }
 
 interface StatsState {
   sessions: ReadingSession[];
-  stats: UserStats;
+  completedBooks: Set<string>;
 
   startSession: (
     bookId: string,
-    mode: ReaderMode,
-    startPosition: number,
+    mode: 'ebook' | 'audio',
+    chapterIndex: number,
   ) => string;
-
-  endSession: (
-    sessionId: string,
-    endPosition: number,
-    mode: ReaderMode,
-    /** Current page for PDF; undefined otherwise */
-    currentPage?: number,
-    /** Start page for PDF; undefined otherwise */
-    startPage?: number,
-  ) => void;
-
-  getSessionsForBook: (bookId: string) => ReadingSession[];
-  recalculateStats: () => void;
+  endSession: (sessionId: string, chapterEnd?: number) => void;
+  markBookCompleted: (bookId: string) => void;
+  getBookStats: (bookId: string) => BookStats;
+  getGlobalStats: () => UserStats;
 }
 
 export const useStatsStore = create<StatsState>()(
   persist(
     (set, get) => ({
       sessions: [],
-      stats: { ...DEFAULT_STATS },
+      completedBooks: new Set<string>(),
 
-      startSession: (bookId, mode, startPosition) => {
-        const id = uuid();
+      startSession: (bookId, mode, chapterIndex) => {
+        const id = generateId();
         const session: ReadingSession = {
           id,
           bookId,
           startTime: Date.now(),
           mode,
-          startPosition,
+          chapterStart: chapterIndex,
         };
         set((state) => ({ sessions: [...state.sessions, session] }));
         return id;
       },
 
-      endSession: (sessionId, endPosition, mode, currentPage, startPage) => {
+      endSession: (sessionId, chapterEnd) => {
+        set((state) => ({
+          sessions: state.sessions.map((s) =>
+            s.id === sessionId
+              ? {
+                  ...s,
+                  endTime: Date.now(),
+                  durationMs: Date.now() - s.startTime,
+                  chapterEnd: chapterEnd ?? s.chapterEnd,
+                }
+              : s,
+          ),
+        }));
+      },
+
+      markBookCompleted: (bookId) => {
         set((state) => {
-          const now = Date.now();
-          const sessions = state.sessions.map((s) => {
-            if (s.id !== sessionId) return s;
-            const durationMs = now - s.startTime;
-            let pagesRead: number | undefined;
-            if (
-              currentPage != null &&
-              startPage != null &&
-              currentPage > startPage
-            ) {
-              pagesRead = currentPage - startPage;
-            }
-            return {
-              ...s,
-              endTime: now,
-              endPosition,
-              mode,
-              durationMs,
-              pagesRead,
-            };
-          });
-          return { sessions };
+          if (state.completedBooks.has(bookId)) return state;
+          const next = new Set(state.completedBooks);
+          next.add(bookId);
+          return { completedBooks: next };
         });
-        get().recalculateStats();
       },
 
-      getSessionsForBook: (bookId) => {
-        return get().sessions.filter((s) => s.bookId === bookId);
+      getBookStats: (bookId) => {
+        const state = get();
+        const bookSessions = state.sessions.filter(
+          (s) => s.bookId === bookId && s.endTime != null,
+        );
+        let totalReadingMs = 0;
+        let totalListeningMs = 0;
+        for (const s of bookSessions) {
+          const dur = s.durationMs ?? 0;
+          if (s.mode === 'ebook') totalReadingMs += dur;
+          else totalListeningMs += dur;
+        }
+
+        const lastSession = [...bookSessions].sort(
+          (a, b) => (b.endTime ?? 0) - (a.endTime ?? 0),
+        )[0];
+
+        return {
+          bookId,
+          totalReadingMs,
+          totalListeningMs,
+          sessions: bookSessions.length,
+          lastPosition: 0, // caller should update with current position
+          completed: state.completedBooks.has(bookId),
+        };
       },
 
-      recalculateStats: () => {
-        const { sessions } = get();
-        const completed = sessions.filter((s) => s.endTime != null);
-        const totalReadingTimeMs = completed.reduce(
-          (sum, s) => sum + (s.durationMs ?? 0),
-          0,
-        );
-        const totalPagesRead = completed.reduce(
-          (sum, s) => sum + (s.pagesRead ?? 0),
-          0,
-        );
-        const totalAudioMinutes = completed
-          .filter((s) => s.mode === 'audio')
-          .reduce((sum, s) => sum + ((s.durationMs ?? 0) / 60000), 0);
+      getGlobalStats: () => {
+        const state = get();
+        let totalReadingMs = 0;
+        let totalListeningMs = 0;
+        const startedBookIds = new Set<string>();
+        const dateCounts: Record<string, number> = {};
+        let lastReadDate: string | undefined;
 
-        const bookIds = new Set(completed.map((s) => s.bookId));
-        const totalBooksRead = bookIds.size;
+        for (const s of state.sessions) {
+          startedBookIds.add(s.bookId);
+          if (s.endTime) {
+            const dur = s.durationMs ?? 0;
+            if (s.mode === 'ebook') totalReadingMs += dur;
+            else totalListeningMs += dur;
 
-        // Books completed: books where last session ended with position >= 0.95
-        const booksCompleted = new Set<string>();
-        for (const bookId of bookIds) {
-          const bookSessions = completed
-            .filter((s) => s.bookId === bookId)
-            .sort((a, b) => (b.endTime ?? 0) - (a.endTime ?? 0));
-          if (
-            bookSessions.length > 0 &&
-            (bookSessions[0].endPosition ?? 0) >= 0.95
-          ) {
-            booksCompleted.add(bookId);
-          }
-        }
-
-        // Daily minutes
-        const dailyMinutes: Record<string, number> = {};
-        for (const s of completed) {
-          const dk = dateKey(s.startTime);
-          const mins = (s.durationMs ?? 0) / 60000;
-          dailyMinutes[dk] = (dailyMinutes[dk] ?? 0) + mins;
-        }
-
-        // Streaks
-        const activeDates = Object.keys(dailyMinutes).sort().reverse();
-        const today = dateKey(Date.now());
-        const yesterday = dateKey(Date.now() - 86400000);
-
-        let currentStreak = 0;
-        const lastReadDate = activeDates.length > 0 ? activeDates[0] : null;
-        if (lastReadDate != null) {
-          const startRef =
-            lastReadDate === today || lastReadDate === yesterday
-              ? lastReadDate
-              : null;
-          if (startRef != null) {
-            // Count consecutive days backwards from startRef
-            const startDate = new Date(startRef + 'T00:00:00Z');
-            for (let i = 0; ; i++) {
-              const d = new Date(startDate.getTime() - i * 86400000);
-              const dk = d.toISOString().slice(0, 10);
-              if ((dailyMinutes[dk] ?? 0) > 0) {
-                currentStreak++;
-              } else {
-                break;
-              }
+            const dateKey = new Date(s.endTime).toISOString().slice(0, 10);
+            dateCounts[dateKey] = (dateCounts[dateKey] ?? 0) + 1;
+            if (!lastReadDate || dateKey > lastReadDate) {
+              lastReadDate = dateKey;
             }
           }
         }
 
-        // Longest streak
-        let longestStreak = 0;
-        const sortedDates = Object.keys(dailyMinutes)
-          .filter((d) => (dailyMinutes[d] ?? 0) > 0)
-          .sort();
-        if (sortedDates.length > 0) {
-          let run = 1;
-          longestStreak = 1;
-          for (let i = 1; i < sortedDates.length; i++) {
-            const prev = new Date(sortedDates[i - 1] + 'T00:00:00Z');
-            const curr = new Date(sortedDates[i] + 'T00:00:00Z');
-            if ((curr.getTime() - prev.getTime()) / 86400000 === 1) {
-              run++;
-              longestStreak = Math.max(longestStreak, run);
-            } else {
-              run = 1;
-            }
-          }
-        }
+        const uniqueDates = Object.keys(dateCounts);
+        const { currentStreak, longestStreak } = computeStreaks(uniqueDates);
 
-        const stats: UserStats = {
-          totalReadingTimeMs,
-          totalBooksRead,
-          totalBooksCompleted: booksCompleted.size,
+        return {
+          totalReadingMs,
+          totalListeningMs,
+          booksStarted: startedBookIds.size,
+          booksCompleted: state.completedBooks.size,
+          sessionsByDate: dateCounts,
           currentStreak,
           longestStreak,
           lastReadDate,
-          dailyMinutes,
-          totalPagesRead,
-          totalAudioMinutes,
         };
-
-        set({ stats });
       },
     }),
     {
       name: STORAGE_KEY,
       storage: createJSONStorage(() => AsyncStorage),
+      // Set is not JSON-serializable — store as array
+      partialize: (state) => ({
+        sessions: state.sessions,
+        completedBooks: [...state.completedBooks],
+      }),
+      merge: (persisted: unknown, current) => {
+        const raw = persisted as {
+          sessions?: ReadingSession[];
+          completedBooks?: string[];
+        };
+        return {
+          ...current,
+          sessions: raw?.sessions ?? [],
+          completedBooks: new Set(raw?.completedBooks ?? []),
+        };
+      },
     },
   ),
 );

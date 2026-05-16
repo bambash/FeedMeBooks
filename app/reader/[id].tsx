@@ -5,6 +5,8 @@ import { useLocalSearchParams, useRouter } from 'expo-router';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   Animated,
+  AppState,
+  AppStateStatus,
   FlatList,
   Modal,
   Pressable,
@@ -56,6 +58,7 @@ export default function ReaderScreen() {
 
   const { getBook, updateEbookPosition, updateAudioPosition, updateAudioFileDuration, setLastMode, setPositionMapCreatedAt } =
     useLibraryStore();
+  const { startSession, endSession, markBookCompleted } = useStatsStore();
   const book = getBook(id);
 
   const [mode, setMode] = useState<ReaderMode>(book?.session.lastMode ?? 'ebook');
@@ -84,6 +87,7 @@ export default function ReaderScreen() {
   const controlBarOpacity = useRef(new Animated.Value(1)).current;
   const controlBarTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const logsRef = useRef<string[]>([]);
+  const sessionRef = useRef<string | null>(null);
 
   // Position map (word-level audio↔ebook alignment)
   const [positionMap, setPositionMap] = useState<PositionMap | null>(null);
@@ -110,7 +114,6 @@ export default function ReaderScreen() {
   }, [mode]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Session tracking ────────────────────────────────────────
-  const { startSession, endSession } = useStatsStore();
   const sessionIdRef = useRef<string | null>(null);
   const sessionStartPosRef = useRef<number>(0);
   const sessionStartPageRef = useRef<number | undefined>(undefined);
@@ -130,9 +133,6 @@ export default function ReaderScreen() {
       endSession(
         sessionIdRef.current,
         endPos,
-        mode,
-        b.session.ebookPosition.page,
-        sessionStartPageRef.current,
       );
     }
 
@@ -161,9 +161,6 @@ export default function ReaderScreen() {
         endSession(
           sessionIdRef.current,
           endPos,
-          mode,
-          b.session.ebookPosition.page,
-          sessionStartPageRef.current,
         );
         sessionIdRef.current = null;
       }
@@ -218,6 +215,41 @@ export default function ReaderScreen() {
       if (texts?.length) chaptersRef.current = texts;
     });
   }, [book?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Session tracking: start on mount, end on unmount
+  useEffect(() => {
+    if (!book) return;
+    const chapterIndex = book.session.ebookPosition.spineIndex ?? -1;
+    const sessionId = startSession(book.id, mode, chapterIndex);
+    sessionRef.current = sessionId;
+    return () => {
+      if (sessionRef.current) {
+        const endChapter = bookRef.current?.session.ebookPosition.spineIndex ?? -1;
+        endSession(sessionRef.current, endChapter);
+        sessionRef.current = null;
+      }
+    };
+  }, [book?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // AppState: end session on background, restart on foreground
+  useEffect(() => {
+    const handleChange = (nextState: AppStateStatus) => {
+      if (nextState === 'background' || nextState === 'inactive') {
+        if (sessionRef.current) {
+          const endChapter = bookRef.current?.session.ebookPosition.spineIndex ?? -1;
+          endSession(sessionRef.current, endChapter);
+          sessionRef.current = null;
+        }
+      } else if (nextState === 'active') {
+        if (!sessionRef.current && bookRef.current) {
+          const chapterIndex = bookRef.current.session.ebookPosition.spineIndex ?? -1;
+          sessionRef.current = startSession(bookRef.current.id, mode, chapterIndex);
+        }
+      }
+    };
+    const sub = AppState.addEventListener('change', handleChange);
+    return () => sub.remove();
+  }, [mode, startSession, endSession]);
 
   const handleLog = useCallback((message: string) => {
     const ts = new Date().toISOString().slice(11, 23);
@@ -586,9 +618,16 @@ export default function ReaderScreen() {
 
   const handleEbookPositionChange = useCallback(
     (position: Partial<EbookPosition>) => {
-      if (book) updateEbookPosition(book.id, position);
+      if (!book) return;
+      updateEbookPosition(book.id, position);
+      if (
+        position.percentage !== undefined &&
+        position.percentage > 0.95
+      ) {
+        markBookCompleted(book.id);
+      }
     },
-    [book, updateEbookPosition],
+    [book, updateEbookPosition, markBookCompleted],
   );
 
   const handleAudioPositionChange = useCallback(
