@@ -9,21 +9,28 @@
  *     { type: 'next' }
  *     { type: 'prev' }
  *     { type: 'goToCfi', cfi: string }
- *     { type: 'goToPercentage', percentage: number }  // 0-1, requires locations to be generated
- *     { type: 'goToChapter', chapterIndex: number }   // jump to spine item by index
- *     { type: 'extractText' }                         // extract all chapter texts for sync indexing
+ *     { type: 'goToPercentage', percentage: number }
+ *     { type: 'goToChapter', chapterIndex: number }
+ *     { type: 'extractText' }
  *     { type: 'setTheme', theme: ThemeData }
  *     { type: 'setFontSize', size: number }
- *     { type: 'startAutoScroll', speed?: number }     // px/s, default 50
+ *     { type: 'startAutoScroll', speed?: number }
  *     { type: 'stopAutoScroll' }
  *     { type: 'setAutoScrollSpeed', speed: number }
+ *     { type: 'peekBackDismiss' }
  *
  *   WebView → RN (postMessage via ReactNativeWebView):
  *     { type: 'ready' }
- *     { type: 'locationChanged', cfi: string, percentage: number }
+ *     { type: 'locationChanged', cfi: string, percentage: number, spineIndex: number }
  *     { type: 'textExtracted', chapters: Array<{chapterIndex: number, text: string}> }
- *     { type: 'autoScrollEnd' }                       // reached end of book
+ *     { type: 'autoScrollEnd' }
  *     { type: 'error', message: string }
+ *     { type: 'chapterProgress', spineIndex: number, chapterFraction: number }
+ *     { type: 'scrollSpeedChanged', speed: number }
+ *     { type: 'chapterTransition', spineIndex: number }
+ *     { type: 'tapToPause' }
+ *     { type: 'tapToResume' }
+ *     { type: 'peekBackRequest', text: string }
  */
 
 export interface EpubTheme {
@@ -52,6 +59,11 @@ export function buildEpubHtml(theme: EpubTheme): string {
       height: 100%;
       overflow-y: auto;
       -webkit-overflow-scrolling: touch;
+      transition: opacity 0.35s ease;
+      opacity: 1;
+    }
+    #viewer.crossfade-out {
+      opacity: 0.15;
     }
     #error {
       display: none;
@@ -73,6 +85,7 @@ export function buildEpubHtml(theme: EpubTheme): string {
       display: flex;
       align-items: center;
       justify-content: center;
+      z-index: 100;
     }
     .spinner {
       width: 32px; height: 32px;
@@ -82,12 +95,48 @@ export function buildEpubHtml(theme: EpubTheme): string {
       animation: spin 0.8s linear infinite;
     }
     @keyframes spin { to { transform: rotate(360deg); } }
+
+    #peek-back {
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.65);
+      display: none;
+      align-items: center;
+      justify-content: center;
+      z-index: 200;
+      flex-direction: column;
+    }
+    #peek-back.active { display: flex; }
+    #peek-back .peek-content {
+      background: ${theme.background};
+      color: ${theme.color};
+      font-family: system-ui, serif;
+      font-size: ${theme.fontSize}px;
+      line-height: 1.6;
+      max-width: 90vw;
+      max-height: 50vh;
+      overflow-y: auto;
+      padding: 24px;
+      border-radius: 12px;
+      border: 1px solid #2A2A3A;
+      box-shadow: 0 12px 40px rgba(0,0,0,0.5);
+    }
+    #peek-back .peek-hint {
+      margin-top: 16px;
+      font-family: system-ui, sans-serif;
+      font-size: 12px;
+      color: #6B6B8A;
+    }
   </style>
 </head>
 <body>
   <div id="loading"><div class="spinner"></div></div>
   <div id="viewer"></div>
   <div id="error"></div>
+  <div id="peek-back">
+    <div class="peek-content" id="peek-text"></div>
+    <div class="peek-hint">Release to dismiss</div>
+  </div>
 
   <script>
     var book = null;
@@ -97,11 +146,30 @@ export function buildEpubHtml(theme: EpubTheme): string {
     var pendingPercentage = null;
 
     // ── Auto-scroll state ────────────────────────────────────────────────────
-    var asActive = false;      // running
-    var asSpeed  = 50;         // px / second
-    var asRAF    = null;       // requestAnimationFrame handle
-    var asLastTs = null;       // previous frame timestamp (ms)
-    var asPaused = false;      // touch-paused
+    var asActive      = false;   // running
+    var asSpeed       = 50;      // px / second (current effective speed)
+    var asBaseSpeed   = 50;      // user-set base speed (before auto-adjustment)
+    var asRAF         = null;    // requestAnimationFrame handle
+    var asLastTs      = null;    // previous frame timestamp (ms)
+    var asPaused      = false;   // touch-paused
+    var asVelocity    = 0;       // current kinetic velocity (px/s)
+    var asDecelActive = false;   // in kinetic deceleration phase
+
+    // ── Tap / double-tap state ───────────────────────────────────────────────
+    var tapTimer      = null;    // setTimeout for double-tap detection
+    var longPressTimer = null;   // setTimeout for long-press detection
+    var touchStartTs  = 0;
+    var touchStartX   = 0;
+    var touchStartY   = 0;
+    var touchMoved    = false;
+
+    // ── Auto-speed density sampling ──────────────────────────────────────────
+    var densityTimer   = null;   // setInterval handle
+    var densitySampleMs = 2500;  // sample interval
+
+    // ── Chapter progress ─────────────────────────────────────────────────────
+    var progressTimer   = null;
+    var currentSpineIdx = -1;
 
     /**
      * Return the best scrollable element for the current epub.js rendering.
@@ -111,7 +179,6 @@ export function buildEpubHtml(theme: EpubTheme): string {
     function getScrollEl() {
       var viewer = document.getElementById('viewer');
       if (!viewer) return null;
-      // Try iframe inner document first (scrolled-doc mode)
       var iframe = viewer.querySelector('iframe');
       if (iframe) {
         try {
@@ -122,24 +189,61 @@ export function buildEpubHtml(theme: EpubTheme): string {
           }
         } catch(e) {}
       }
-      // Fallback: outer viewer div (paginated mode or unknown layout)
       return viewer;
+    }
+
+    // ── Chapter crossfade helpers ────────────────────────────────────────────
+    function crossfadeOut(cb) {
+      var viewer = document.getElementById('viewer');
+      if (!viewer) { cb(); return; }
+      viewer.classList.add('crossfade-out');
+      setTimeout(function() { cb(); }, 300);
+    }
+
+    function crossfadeIn() {
+      var viewer = document.getElementById('viewer');
+      if (viewer) viewer.classList.remove('crossfade-out');
+    }
+
+    // ── Kinetic deceleration tick ────────────────────────────────────────────
+    function decelTick(ts) {
+      if (!asDecelActive) return;
+      if (asLastTs === null) { asLastTs = ts; asRAF = requestAnimationFrame(decelTick); return; }
+      var dt = Math.min((ts - asLastTs) / 1000, 0.05);
+      asLastTs = ts;
+      // Exponential decay: multiply by 0.92 each 16ms is roughly halved in ~130ms
+      var decay = Math.pow(0.92, dt * 60);
+      asVelocity *= decay;
+      var el = getScrollEl();
+      if (el) el.scrollTop += asVelocity * dt;
+      if (Math.abs(asVelocity) < 2) {
+        asDecelActive = false;
+        asVelocity = 0;
+        if (asRAF) { cancelAnimationFrame(asRAF); asRAF = null; }
+        asLastTs = null;
+        send({ type: 'tapToPause' });
+        return;
+      }
+      asRAF = requestAnimationFrame(decelTick);
     }
 
     function asAdvanceChapter() {
       asActive = false;
       if (asRAF) { cancelAnimationFrame(asRAF); asRAF = null; }
       if (!rendition) return;
-      rendition.next().then(function() {
-        var el = getScrollEl();
-        if (el) el.scrollTop = 0;
-        asActive = true;
-        asLastTs = null;
-        asRAF = requestAnimationFrame(asTick);
-      }).catch(function() {
-        // End of book
-        asActive = false;
-        send({ type: 'autoScrollEnd' });
+      crossfadeOut(function() {
+        rendition.next().then(function() {
+          var el = getScrollEl();
+          if (el) el.scrollTop = 0;
+          asActive = true;
+          asLastTs = null;
+          asRAF = requestAnimationFrame(asTick);
+          setTimeout(crossfadeIn, 50);
+        }).catch(function() {
+          asActive = false;
+          crossfadeIn();
+          send({ type: 'autoScrollEnd' });
+        });
       });
     }
 
@@ -147,30 +251,179 @@ export function buildEpubHtml(theme: EpubTheme): string {
       if (!asActive) return;
       asRAF = requestAnimationFrame(asTick);
       if (asPaused || asLastTs === null) { asLastTs = ts; return; }
-      var dt = Math.min((ts - asLastTs) / 1000, 0.05); // cap at 50 ms
+      var dt = Math.min((ts - asLastTs) / 1000, 0.05);
       asLastTs = ts;
       var el = getScrollEl();
       if (!el) return;
+      // Track velocity for kinetic deceleration
+      asVelocity = asSpeed;
       el.scrollTop += asSpeed * dt;
-      // At the bottom? Advance to next chapter.
       if (el.scrollHeight - el.scrollTop - el.clientHeight < 4) {
         asAdvanceChapter();
       }
     }
 
     function startAutoScroll(speed) {
-      if (speed != null) asSpeed = speed;
+      if (speed != null) { asSpeed = speed; asBaseSpeed = speed; }
       asActive = true;
       asPaused = false;
+      asDecelActive = false;
+      asVelocity = 0;
       asLastTs = null;
-      if (!asRAF) asRAF = requestAnimationFrame(asTick);
+      if (asRAF) { cancelAnimationFrame(asRAF); asRAF = null; }
+      asRAF = requestAnimationFrame(asTick);
+      startDensitySampler();
+      startProgressReporter();
     }
 
     function stopAutoScroll() {
-      asActive = false;
+      // If scrolling and has velocity, decelerate instead of hard stop
+      if (asActive && !asPaused && asVelocity > 5) {
+        asActive = false;
+        asDecelActive = true;
+        asLastTs = null;
+        if (asRAF) { cancelAnimationFrame(asRAF); asRAF = null; }
+        asRAF = requestAnimationFrame(decelTick);
+      } else {
+        asActive = false;
+        asDecelActive = false;
+        asVelocity = 0;
+        if (asRAF) { cancelAnimationFrame(asRAF); asRAF = null; }
+        asLastTs = null;
+      }
       asPaused = false;
-      if (asRAF) { cancelAnimationFrame(asRAF); asRAF = null; }
+      stopDensitySampler();
+      stopProgressReporter();
+    }
+
+    function pauseAutoScroll() {
+      if (asActive) {
+        asPaused = true;
+        // Initiate kinetic deceleration
+        if (asVelocity > 5) {
+          asActive = false;
+          asDecelActive = true;
+          asLastTs = null;
+          if (asRAF) { cancelAnimationFrame(asRAF); asRAF = null; }
+          asRAF = requestAnimationFrame(decelTick);
+        }
+      }
+    }
+
+    function resumeAutoScroll() {
+      if (!asActive && !asDecelActive) {
+        asActive = true;
+        asPaused = false;
+        asVelocity = 0;
+        asLastTs = null;
+        if (asRAF) { cancelAnimationFrame(asRAF); asRAF = null; }
+        asRAF = requestAnimationFrame(asTick);
+        startDensitySampler();
+        startProgressReporter();
+        return;
+      }
+      // If decelerating, snap out of decel and resume
+      if (asDecelActive) {
+        asDecelActive = false;
+        asVelocity = 0;
+        asActive = true;
+        asPaused = false;
+        asLastTs = null;
+        if (asRAF) { cancelAnimationFrame(asRAF); asRAF = null; }
+        asRAF = requestAnimationFrame(asTick);
+        startDensitySampler();
+        startProgressReporter();
+        return;
+      }
+      asPaused = false;
       asLastTs = null;
+    }
+
+    // ── Auto-speed adjustment based on text density ──────────────────────────
+    function startDensitySampler() {
+      stopDensitySampler();
+      densityTimer = setInterval(sampleAndAdjustSpeed, densitySampleMs);
+    }
+
+    function stopDensitySampler() {
+      if (densityTimer) { clearInterval(densityTimer); densityTimer = null; }
+    }
+
+    function sampleAndAdjustSpeed() {
+      if (!asActive || asPaused) return;
+      var el = getScrollEl();
+      if (!el) return;
+      // Count visible text characters within the viewport
+      var visibleChars = 0;
+      try {
+        var range = document.createRange ? document.createRange() : null;
+        if (range) {
+          var rect = el.getBoundingClientRect ? el.getBoundingClientRect() : null;
+          if (!rect) return;
+          // Walk text nodes in the scrollable element and count those in viewport
+          var walker = document.createTreeWalker ? document.createTreeWalker(el, 4 /* NodeFilter.SHOW_TEXT */, null, false) : null;
+          if (walker) {
+            var node;
+            while ((node = walker.nextNode())) {
+              try {
+                var sr = range;
+                sr.selectNodeContents(node);
+                var nodeRects = sr.getClientRects();
+                for (var i = 0; i < nodeRects.length; i++) {
+                  var r = nodeRects[i];
+                  if (r.bottom >= rect.top && r.top <= rect.bottom) {
+                    var visiblePortion = (Math.min(r.bottom, rect.bottom) - Math.max(r.top, rect.top)) / Math.max(r.height, 1);
+                    visibleChars += Math.round((node.textContent || '').length * Math.max(0, Math.min(1, visiblePortion)));
+                  }
+                }
+              } catch(e) {}
+            }
+          }
+        }
+      } catch(e) {}
+
+      // Compute density: chars per viewport pixel height
+      var vh = (el.clientHeight || window.innerHeight);
+      var density = vh > 0 ? visibleChars / vh : 0;
+
+      // Low density (< 3 chars/px) → dialogue, speed up
+      // High density (> 6 chars/px) → dense prose, slow down
+      // Clamp adjustment to ±40% of base speed
+      var factor = 1.0;
+      if (density < 3) factor = 1.15;
+      else if (density < 4) factor = 1.08;
+      else if (density > 6) factor = 0.88;
+      else if (density > 5) factor = 0.94;
+
+      var newSpeed = Math.round(asBaseSpeed * factor);
+      newSpeed = Math.max(20, Math.min(120, newSpeed));
+      if (newSpeed !== asSpeed) {
+        asSpeed = newSpeed;
+        send({ type: 'scrollSpeedChanged', speed: newSpeed });
+      }
+    }
+
+    // ── Chapter progress reporter ────────────────────────────────────────────
+    function startProgressReporter() {
+      stopProgressReporter();
+      progressTimer = setInterval(reportChapterProgress, 1000);
+    }
+
+    function stopProgressReporter() {
+      if (progressTimer) { clearInterval(progressTimer); progressTimer = null; }
+    }
+
+    function reportChapterProgress() {
+      if (!asActive && !asDecelActive) return;
+      var el = getScrollEl();
+      if (!el || el.scrollHeight <= el.clientHeight) return;
+      var fraction = el.scrollTop / (el.scrollHeight - el.clientHeight);
+      fraction = Math.max(0, Math.min(1, fraction));
+      send({
+        type: 'chapterProgress',
+        spineIndex: currentSpineIdx,
+        chapterFraction: Math.round(fraction * 1000) / 1000,
+      });
     }
 
     /**
@@ -200,7 +453,6 @@ export function buildEpubHtml(theme: EpubTheme): string {
         }
         log('cfi was empty, falling through to spine fallback');
       }
-      // Fallback: navigate by spine index (more reliable than href for base64-loaded epubs)
       var items = book.spine ? book.spine.items : [];
       if (!items.length) {
         pendingPercentage = pct;
@@ -270,18 +522,15 @@ export function buildEpubHtml(theme: EpubTheme): string {
           document.getElementById('loading').style.display = 'none';
           send({ type: 'ready' });
           log('book displayed, spineItems=' + (book.spine ? book.spine.items.length : 0));
-          // Apply any percentage jump that arrived before the book was loaded
           if (pendingPercentage !== null) {
             log('applying pendingPercentage=' + pendingPercentage);
             var pct = pendingPercentage;
             pendingPercentage = null;
             goToPercentage(pct);
           }
-          // Generate precise locations in background for future jumps
           book.locations.generate(1024).then(function() {
             locationsReady = true;
             log('locations.generate() done, count=' + book.locations.length());
-            // Re-emit current location with accurate percentage now that locations are ready
             var loc = rendition.currentLocation();
             if (loc && loc.start && loc.start.cfi) {
               var pct = book.locations.percentageFromCfi(loc.start.cfi);
@@ -303,14 +552,19 @@ export function buildEpubHtml(theme: EpubTheme): string {
             var currentItem = book.spine.get(location.start.href);
             if (currentItem) spineIdx = currentItem.index;
           } catch(e) {}
-          // In scrolled-doc mode location.start.percentage is always 0.
-          // Use book.locations.percentageFromCfi when locations are ready.
           var pct = location.start.percentage || 0;
           if (locationsReady && location.start.cfi) {
             try {
               var computed = book.locations.percentageFromCfi(location.start.cfi);
               if (computed != null && computed >= 0) pct = computed;
             } catch(e) {}
+          }
+          if (spineIdx !== currentSpineIdx) {
+            var prevIdx = currentSpineIdx;
+            currentSpineIdx = spineIdx;
+            if (prevIdx >= 0) {
+              send({ type: 'chapterTransition', spineIndex: spineIdx });
+            }
           }
           log('relocated cfi=' + location.start.cfi + ' pct=' + pct + ' spineIdx=' + spineIdx);
           send({
@@ -326,25 +580,133 @@ export function buildEpubHtml(theme: EpubTheme): string {
       }
     }
 
-    // Touch: pause auto-scroll while finger is on screen; horizontal swipe = chapter nav.
-    // Tap zones are removed — in scrolled-doc mode the reader scrolls naturally.
-    var touchStartX = 0;
-    var touchStartY = 0;
+    // ── Touch: tap/double-tap, long-press peek-back, swipe for chapter nav ──
+    function clearTapTimer() {
+      if (tapTimer) { clearTimeout(tapTimer); tapTimer = null; }
+    }
+    function clearLongPress() {
+      if (longPressTimer) { clearTimeout(longPressTimer); longPressTimer = null; }
+    }
+
+    function getPreviousParagraphText() {
+      try {
+        var el = getScrollEl();
+        if (!el) return '';
+        // Find all paragraph elements in the scroll container
+        var paras = el.querySelectorAll('p');
+        if (!paras.length) return '';
+        var scrollTop = el.scrollTop;
+        // Walk backwards to find the last paragraph fully above the current viewport
+        var best = null;
+        for (var i = paras.length - 1; i >= 0; i--) {
+          var p = paras[i];
+          // getBoundingClientRect works within iframe too (relative to iframe viewport)
+          if (p.getBoundingClientRect) {
+            var rect = p.getBoundingClientRect();
+            // Element below viewport → skip
+            if (rect.top > el.clientHeight * 0.3) continue;
+            // Element fully or partially above viewport top → candidate
+            if (rect.bottom < el.clientHeight * 0.2) {
+              best = p.textContent || '';
+              break;
+            }
+          }
+        }
+        return (best || '').replace(/\\s+/g, ' ').trim().slice(0, 300);
+      } catch(e) { return ''; }
+    }
+
     document.addEventListener('touchstart', function(e) {
+      touchStartTs = Date.now();
       touchStartX = e.touches[0].clientX;
       touchStartY = e.touches[0].clientY;
-      if (asActive) asPaused = true; // freeze auto-scroll while touching
+      touchMoved = false;
+
+      clearTapTimer();
+      clearLongPress();
+
+      // Pause auto-scroll on touch
+      if (asActive && !asPaused) {
+        pauseAutoScroll();
+      }
+
+      // Long-press peek-back (500ms hold)
+      longPressTimer = setTimeout(function() {
+        if (!touchMoved && !asActive && !asDecelActive) {
+          var prevText = getPreviousParagraphText();
+          if (prevText) {
+            var peek = document.getElementById('peek-back');
+            var peekText = document.getElementById('peek-text');
+            if (peek && peekText) {
+              peekText.textContent = prevText;
+              peek.classList.add('active');
+              send({ type: 'peekBackRequest', text: prevText });
+            }
+          }
+        }
+      }, 500);
     }, { passive: true });
+
+    document.addEventListener('touchmove', function(e) {
+      if (Math.abs(e.touches[0].clientX - touchStartX) > 8 ||
+          Math.abs(e.touches[0].clientY - touchStartY) > 8) {
+        touchMoved = true;
+        clearLongPress();
+      }
+    }, { passive: true });
+
     document.addEventListener('touchend', function(e) {
-      asPaused = false; // resume auto-scroll (if still active)
+      clearLongPress();
+
+      // Dismiss peek-back if active
+      var peek = document.getElementById('peek-back');
+      if (peek && peek.classList.contains('active')) {
+        peek.classList.remove('active');
+        send({ type: 'peekBackDismiss' });
+        return;
+      }
+
       var endX = e.changedTouches[0].clientX;
       var dx = endX - touchStartX;
       var dy = e.changedTouches[0].clientY - touchStartY;
+
       if (!rendition) return;
-      // Horizontal swipe only → chapter navigation
+
+      // Horizontal swipe → chapter navigation (only when not auto-scrolling)
       if (Math.abs(dx) > 50 && Math.abs(dx) > Math.abs(dy) * 1.5) {
         if (dx < 0) { stopAutoScroll(); rendition.next(); }
         else        { stopAutoScroll(); rendition.prev(); }
+        return;
+      }
+
+      // Tap detection: small movement, short duration
+      var duration = Date.now() - touchStartTs;
+      var tapDist = Math.sqrt(dx * dx + dy * dy);
+
+      if (tapDist < 15 && duration < 400) {
+        // Check for double-tap (within 400ms of last tap)
+        if (tapTimer) {
+          // Double-tap detected — resume auto-scroll
+          clearTapTimer();
+          resumeAutoScroll();
+          send({ type: 'tapToResume' });
+        } else {
+          // Single tap — pause auto-scroll
+          tapTimer = setTimeout(function() {
+            tapTimer = null;
+            if (asActive && !asPaused) {
+              pauseAutoScroll();
+            }
+            send({ type: 'tapToPause' });
+          }, 400);
+        }
+      } else {
+        // If finger stayed still but for longer (resting finger while reading),
+        // just resume auto-scroll if it was paused
+        if (asPaused && asDecelActive === false && asActive === false) {
+          resumeAutoScroll();
+          send({ type: 'tapToResume' });
+        }
       }
     }, { passive: true });
 
@@ -357,7 +719,6 @@ export function buildEpubHtml(theme: EpubTheme): string {
 
     // Message handler from React Native
     function handleMessage(event) {
-      // epub.js / JSZip post internal messages (e.g. setImmediate shims) — ignore non-JSON
       if (!event.data || typeof event.data !== 'string' || event.data[0] !== '{') return;
       try {
         var data = JSON.parse(event.data);
@@ -407,6 +768,12 @@ export function buildEpubHtml(theme: EpubTheme): string {
             break;
           case 'setAutoScrollSpeed':
             asSpeed = Number(data.speed) || asSpeed;
+            asBaseSpeed = Math.max(20, Math.min(120, asSpeed));
+            send({ type: 'scrollSpeedChanged', speed: asSpeed });
+            break;
+          case 'peekBackDismiss':
+            var peekEl = document.getElementById('peek-back');
+            if (peekEl) peekEl.classList.remove('active');
             break;
         }
       } catch(e) { log('handleMessage error: ' + e); }
@@ -516,10 +883,6 @@ export function buildEpubHtml(theme: EpubTheme): string {
       }
 
       // ── 1. Try TOC-based extraction ──────────────────────────────────────
-      /**
-       * Labels whose text signals non-narrated back/front matter.
-       * Compared case-insensitively via substring match.
-       */
       var BACK_MATTER = [
         'ars arcanum', 'acknowledgment', 'appendix', 'about the author',
         'index', 'glossary', 'reading group', 'preview', 'excerpt',
@@ -535,7 +898,7 @@ export function buildEpubHtml(theme: EpubTheme): string {
         return false;
       }
 
-      var tocSpineItems = []; // { item, label }
+      var tocSpineItems = [];
       if (book.navigation && book.navigation.toc && book.navigation.toc.length > 0) {
         var flatToc = getTocLeaves(book.navigation.toc);
         log('extractAllChapterText: TOC has ' + flatToc.length + ' leaf entries');
@@ -556,7 +919,6 @@ export function buildEpubHtml(theme: EpubTheme): string {
             tocSpineItems.push({ item: spineItem, label: label });
           }
         }
-        // Sort by spine order so proportional mapping is monotone
         tocSpineItems.sort(function(a, b) { return a.item.index - b.item.index; });
         log('extractAllChapterText: ' + tocSpineItems.length + ' narrated spine items from TOC');
       }
