@@ -47,11 +47,36 @@ export interface BookSession {
   audioFileDurations: number[];
   lastMode: ReaderMode;
   lastOpenedAt: number; // unix ms
-  /** Unix ms when the word-level sync index was built; undefined = not yet built */
-  syncMapCreatedAt?: number;
+  /** Unix ms when the word-level position index was built; undefined = not yet built */
+  positionMapCreatedAt?: number;
 }
 
-/** A single point in the audio↔ebook sync map */
+/** A single anchor point in the audio↔ebook position map */
+export interface PositionAnchor {
+  /** Milliseconds from the start of the whole audiobook */
+  audioMs: number;
+  /** Index into book.audioUris[] */
+  fileIndex: number;
+  /** Seconds within that file */
+  fileSeconds: number;
+  /** epub.js spine chapter index (0-based) */
+  chapterIndex: number;
+  /** 0–1 position within the chapter (reserved for future fine-grained sync) */
+  withinChapterFraction: number;
+  /** How this anchor was derived */
+  source: 'proportional' | 'transcript';
+}
+
+/** Position map for an audiobook+ebook pair, stored separately in AsyncStorage */
+export interface PositionMap {
+  bookId: string;
+  createdAt: number; // unix ms
+  totalAudioMs: number;
+  /** Sorted ascending by audioMs */
+  anchors: PositionAnchor[];
+}
+
+/** @deprecated Use PositionAnchor instead */
 export interface SyncPoint {
   /** Milliseconds from the start of the whole audiobook */
   audioMs: number;
@@ -65,7 +90,7 @@ export interface SyncPoint {
   withinChapterFraction: number;
 }
 
-/** Word-level sync map for an audiobook+ebook pair, stored separately in AsyncStorage */
+/** @deprecated Use PositionMap instead */
 export interface SyncMap {
   bookId: string;
   createdAt: number; // unix ms

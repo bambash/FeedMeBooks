@@ -16,10 +16,10 @@ import AudioPlayer from '../../src/components/AudioPlayer';
 import EbookReader from '../../src/components/EbookReader';
 import { useLibraryStore } from '../../src/store/libraryStore';
 import { colors, radius, spacing, typography } from '../../src/theme';
-import type { EbookPosition, ReaderMode, SyncMap } from '../../src/types';
+import type { EbookPosition, PositionAnchor, PositionMap, ReaderMode } from '../../src/types';
 import { buildSyncPoints, buildSyncPointsFromTranscripts, fillFilePositions, findChapterByWindowText, lookupByAudio, lookupByChapter, type ChapterText } from '../../src/utils/alignSync';
 import { downloadModel, isModelDownloaded, releaseWhisperContext, transcribeFile, transcribeWindow } from '../../src/utils/transcribeAudio';
-import { deleteSyncMap, loadSyncMap, saveSyncMap } from '../../src/utils/syncMapStorage';
+import { deletePositionMap, loadPositionMap, savePositionMap } from '../../src/utils/positionMapStorage';
 import { deleteTranscriptionCache, loadCachedFileSegments, loadCacheMeta, saveFileSegments } from '../../src/utils/transcriptionCache';
 import { deleteChapterTexts, loadChapterTexts, saveChapterTexts } from '../../src/utils/chapterTextStorage';
 
@@ -51,7 +51,7 @@ export default function ReaderScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
 
-  const { getBook, updateEbookPosition, updateAudioPosition, updateAudioFileDuration, setLastMode, setSyncMapCreatedAt } =
+  const { getBook, updateEbookPosition, updateAudioPosition, updateAudioFileDuration, setLastMode, setPositionMapCreatedAt } =
     useLibraryStore();
   const book = getBook(id);
 
@@ -75,8 +75,8 @@ export default function ReaderScreen() {
   const [epubGoPrevRequest, setEpubGoPrevRequest] = useState(0);
   const logsRef = useRef<string[]>([]);
 
-  // Sync map (word-level audio↔ebook alignment)
-  const [syncMap, setSyncMap] = useState<SyncMap | null>(null);
+  // Position map (word-level audio↔ebook alignment)
+  const [positionMap, setPositionMap] = useState<PositionMap | null>(null);
   const [indexStatus, setIndexStatus] = useState<IndexStatus | null>(null);
   /** Increment to trigger epub text extraction from the WebView */
   const [textExtractRequest, setTextExtractRequest] = useState(0);
@@ -137,11 +137,11 @@ export default function ReaderScreen() {
     return () => { indexCancelledRef.current = true; };
   }, [book?.id]);
 
-  // Load persisted sync map and chapter texts when the book changes
+  // Load persisted position map and chapter texts when the book changes
   useEffect(() => {
     if (!book?.id) return;
-    loadSyncMap(book.id).then((map) => {
-      if (map) setSyncMap(map);
+    loadPositionMap(book.id).then((map) => {
+      if (map) setPositionMap(map);
     });
     loadChapterTexts(book.id).then((texts) => {
       if (texts?.length) chaptersRef.current = texts;
@@ -309,19 +309,19 @@ export default function ReaderScreen() {
 
         if (indexCancelledRef.current) return;
 
-        const map: SyncMap = {
+        const map: PositionMap = {
           bookId: b.id,
           createdAt: Date.now(),
           totalAudioMs: cumulativeMs,
-          points,
+          anchors: points,
         };
-        await saveSyncMap(map);
+        await savePositionMap(map);
         await deleteTranscriptionCache(b.id);
         await saveChapterTexts(b.id, chapters);
-        setSyncMapCreatedAt(b.id, map.createdAt);
-        setSyncMap(map);
+        setPositionMapCreatedAt(b.id, map.createdAt);
+        setPositionMap(map);
         setIndexStatus({ phase: 'done', progress: 1 });
-        handleLog('[index] sync map saved ✓');
+        handleLog('[index] position map saved ✓');
       } catch (err) {
         releaseWhisperContext();
         const msg = err instanceof Error ? err.message : String(err);
@@ -334,7 +334,7 @@ export default function ReaderScreen() {
           });
       }
     },
-    [setSyncMapCreatedAt, handleLog],
+    [setPositionMapCreatedAt, handleLog],
   );
 
   /** Start the sync index build: request epub text extraction first */
@@ -347,11 +347,11 @@ export default function ReaderScreen() {
   const handleRebuildIndex = useCallback(async () => {
     const b = bookRef.current;
     if (!b) return;
-    await Promise.all([deleteSyncMap(b.id), deleteTranscriptionCache(b.id), deleteChapterTexts(b.id)]);
-    setSyncMapCreatedAt(b.id, undefined);
-    setSyncMap(null);
+    await Promise.all([deletePositionMap(b.id), deleteTranscriptionCache(b.id), deleteChapterTexts(b.id)]);
+    setPositionMapCreatedAt(b.id, undefined);
+    setPositionMap(null);
     setIndexStatus(null);
-  }, [setSyncMapCreatedAt]);
+  }, [setPositionMapCreatedAt]);
 
   const switchMode = useCallback(
     (next: ReaderMode) => {
@@ -369,11 +369,11 @@ export default function ReaderScreen() {
             b.session.audioPosition;
           const pct = Math.min(elapsed / totalDuration, 1);
 
-          // Prefer sync-map chapter lookup over raw percentage
-          const currentMap = syncMap;
-          if (currentMap?.points.length && pct > 0.01) {
+          // Prefer position-map chapter lookup over raw percentage
+          const currentMap = positionMap;
+          if (currentMap?.anchors.length && pct > 0.01) {
             const currentAudioMs = elapsed * 1000;
-            const pt = lookupByAudio(currentMap.points, currentAudioMs);
+            const pt = lookupByAudio(currentMap.anchors, currentAudioMs);
             handleLog(
               `[sync] lookup: fileIdx=${b.session.audioFileIndex} pos=${b.session.audioPosition.toFixed(1)}s` +
               ` elapsed=${elapsed.toFixed(0)}s currentAudioMs=${currentAudioMs}` +
@@ -427,10 +427,10 @@ export default function ReaderScreen() {
           // Allow sync when we have a valid spine index even if pct is 0
           // (scrolled-doc mode may report pct=0 until locations are generated)
           if (spineIndex >= 0 || pct > 0.01) {
-            const currentMap = syncMap;
-            // Prefer sync-map lookup by spine/chapter index (accurate)
-            if (currentMap?.points.length && spineIndex >= 0) {
-              const pt = lookupByChapter(currentMap.points, spineIndex);
+            const currentMap = positionMap;
+            // Prefer position-map lookup by spine/chapter index (accurate)
+            if (currentMap?.anchors.length && spineIndex >= 0) {
+              const pt = lookupByChapter(currentMap.anchors, spineIndex);
               if (pt) {
                 // Re-derive file position from pt.audioMs using the session's actual
                 // file durations rather than the pre-computed fileIndex/fileSeconds stored
@@ -584,7 +584,7 @@ export default function ReaderScreen() {
           onCopyLogs={copyLogs}
           onViewLogs={() => setShowLogViewer(true)}
           canBuildIndex={canEbook && canAudio && mode === 'ebook'}
-          syncMapCreatedAt={book.session.syncMapCreatedAt}
+          positionMapCreatedAt={book.session.positionMapCreatedAt}
           indexStatus={indexStatus}
           onBuildIndex={startBuildIndex}
           onRebuildIndex={handleRebuildIndex}
@@ -768,7 +768,7 @@ function SettingsPanel({
   onCopyLogs,
   onViewLogs,
   canBuildIndex,
-  syncMapCreatedAt,
+  positionMapCreatedAt,
   indexStatus,
   onBuildIndex,
   onRebuildIndex,
@@ -782,7 +782,7 @@ function SettingsPanel({
   onCopyLogs: () => void;
   onViewLogs: () => void;
   canBuildIndex: boolean;
-  syncMapCreatedAt?: number;
+  positionMapCreatedAt?: number;
   indexStatus: IndexStatus | null;
   onBuildIndex: () => void;
   onRebuildIndex: () => void;
@@ -809,7 +809,7 @@ function SettingsPanel({
       case 'downloading':   return `Downloading model… ${Math.round(indexStatus.progress * 100)}%`;
       case 'transcribing':  return `Transcribing file ${(indexStatus.transcribeFileIndex ?? 0) + 1}… ${Math.round(indexStatus.progress * 100)}%`;
       case 'aligning':      return 'Aligning words…';
-      case 'done':          return null; // shown via syncMapCreatedAt
+      case 'done':          return null; // shown via positionMapCreatedAt
       case 'error':         return `Error: ${indexStatus.error}`;
       default:              return null;
     }
@@ -853,9 +853,9 @@ function SettingsPanel({
             <View style={{ flex: 1 }}>
               <Text style={settingsStyles.label}>Word Sync Index</Text>
               <Text style={settingsStyles.sublabel}>
-                {syncMapCreatedAt
-                  ? `Indexed ${new Date(syncMapCreatedAt).toLocaleDateString()}`
-                  : 'Not yet indexed — enables chapter-accurate sync'}
+                {positionMapCreatedAt
+                  ? `Indexed ${new Date(positionMapCreatedAt).toLocaleDateString()}`
+                  : 'Using proportional sync. Transcribe audio for higher precision.'}
               </Text>
               {indexLabel ? (
                 <Text style={[settingsStyles.sublabel, settingsStyles.sublabelActive]}>
@@ -863,7 +863,7 @@ function SettingsPanel({
                 </Text>
               ) : null}
             </View>
-            {syncMapCreatedAt ? (
+            {positionMapCreatedAt ? (
               <Pressable
                 style={[settingsStyles.sizeBtn, isIndexing && settingsStyles.btnDisabled]}
                 onPress={isIndexing ? undefined : onRebuildIndex}
