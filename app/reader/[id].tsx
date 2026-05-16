@@ -433,14 +433,14 @@ export default function ReaderScreen() {
 
           // Prefer sync-map chapter lookup over raw percentage
           const currentMap = syncMap;
-          if (currentMap?.points.length && pct > 0.01) {
+          if (currentMap?.anchors.length && pct > 0.01) {
             const currentAudioMs = elapsed * 1000;
-            const pt = lookupByAudio(currentMap.points, currentAudioMs);
+            const pt = lookupByAudio(currentMap.anchors, currentAudioMs);
             handleLog(
               `[sync] lookup: fileIdx=${b.session.audioFileIndex} pos=${b.session.audioPosition.toFixed(1)}s` +
               ` elapsed=${elapsed.toFixed(0)}s currentAudioMs=${currentAudioMs}` +
-              ` mapTotalMs=${currentMap.totalAudioMs} points=${currentMap.points.length}` +
-              ` firstPtMs=${currentMap.points[0]?.audioMs} lastPtMs=${currentMap.points[currentMap.points.length - 1]?.audioMs}` +
+              ` mapTotalMs=${currentMap.totalAudioMs} points=${currentMap.anchors.length}` +
+              ` firstPtMs=${currentMap.anchors[0]?.audioMs} lastPtMs=${currentMap.anchors[currentMap.anchors.length - 1]?.audioMs}` +
               ` → ch=${pt?.chapterIndex ?? 'null'}`,
             );
             if (pt) {
@@ -491,8 +491,8 @@ export default function ReaderScreen() {
           if (spineIndex >= 0 || pct > 0.01) {
             const currentMap = syncMap;
             // Prefer sync-map lookup by spine/chapter index (accurate)
-            if (currentMap?.points.length && spineIndex >= 0) {
-              const pt = lookupByChapter(currentMap.points, spineIndex);
+            if (currentMap?.anchors.length && spineIndex >= 0) {
+              const pt = lookupByChapter(currentMap.anchors, spineIndex);
               if (pt) {
                 // Re-derive file position from pt.audioMs using the session's actual
                 // file durations rather than the pre-computed fileIndex/fileSeconds stored
