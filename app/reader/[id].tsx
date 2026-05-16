@@ -1,5 +1,6 @@
 import { Audio } from 'expo-av';
 import * as Clipboard from 'expo-clipboard';
+import * as Haptics from 'expo-haptics';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
@@ -14,6 +15,7 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import AudioPlayer from '../../src/components/AudioPlayer';
 import EbookReader from '../../src/components/EbookReader';
+import { SPEED_LEVELS } from '../../src/components/EbookReader/EpubReader';
 import { useLibraryStore } from '../../src/store/libraryStore';
 import { colors, radius, spacing, typography } from '../../src/theme';
 import type { EbookPosition, ReaderMode, SyncMap } from '../../src/types';
@@ -70,9 +72,16 @@ export default function ReaderScreen() {
   const [logs, setLogs] = useState<string[]>([]);
   const [showLogViewer, setShowLogViewer] = useState(false);
   const [autoScrollActive, setAutoScrollActive] = useState(false);
-  const [scrollSpeed, setScrollSpeed] = useState(50); // px/s
+  const [scrollSpeed, setScrollSpeed] = useState(50); // px/s (user-set)
+  const [effectiveScrollSpeed, setEffectiveScrollSpeed] = useState(50); // actual speed from WebView (may differ due to auto-density)
   const [epubGoNextRequest, setEpubGoNextRequest] = useState(0);
   const [epubGoPrevRequest, setEpubGoPrevRequest] = useState(0);
+  const [chapterProgressFraction, setChapterProgressFraction] = useState(0); // 0-1 through current chapter
+  const [currentChapterSpineIdx, setCurrentChapterSpineIdx] = useState(-1);
+  const [speedDialLevel, setSpeedDialLevel] = useState(2); // index into SPEED_LEVELS: 0=30, 1=40, 2=50, 3=65, 4=85
+  const speedDialBounce = useRef(new Animated.Value(1)).current;
+  const controlBarOpacity = useRef(new Animated.Value(1)).current;
+  const controlBarTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const logsRef = useRef<string[]>([]);
 
   // Sync map (word-level audio↔ebook alignment)
@@ -538,6 +547,105 @@ export default function ReaderScreen() {
     setAutoScrollActive(false);
   }, []);
 
+  // ── Control bar auto-hide ─────────────────────────────────────────────────
+  const showControlBar = useCallback(() => {
+    Animated.timing(controlBarOpacity, {
+      toValue: 1,
+      duration: 200,
+      useNativeDriver: true,
+    }).start();
+    if (controlBarTimeoutRef.current) clearTimeout(controlBarTimeoutRef.current);
+    controlBarTimeoutRef.current = setTimeout(() => {
+      Animated.timing(controlBarOpacity, {
+        toValue: 0,
+        duration: 600,
+        useNativeDriver: true,
+      }).start();
+    }, 3000);
+  }, [controlBarOpacity]);
+
+  // Show controls initially and on mount
+  useEffect(() => {
+    showControlBar();
+    return () => {
+      if (controlBarTimeoutRef.current) clearTimeout(controlBarTimeoutRef.current);
+    };
+  }, [showControlBar]);
+
+  // ── New event handlers ────────────────────────────────────────────────────
+  const handleScrollSpeedChanged = useCallback((speed: number) => {
+    setEffectiveScrollSpeed(speed);
+  }, []);
+
+  const handleChapterProgress = useCallback((_spineIndex: number, fraction: number) => {
+    setChapterProgressFraction(fraction);
+  }, []);
+
+  const handleChapterTransition = useCallback((spineIndex: number) => {
+    setCurrentChapterSpineIdx(spineIndex);
+    setChapterProgressFraction(0);
+    try { Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success); } catch (_) {}
+  }, []);
+
+  const handleTapPause = useCallback(() => {
+    setAutoScrollActive(false);
+    showControlBar();
+  }, [showControlBar]);
+
+  const handleTapResume = useCallback(() => {
+    setAutoScrollActive(true);
+    showControlBar();
+  }, [showControlBar]);
+
+  const handlePeekBack = useCallback(() => {
+    try { Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium); } catch (_) {}
+  }, []);
+
+  const handleSwipeSpeedAdjust = useCallback((delta: number) => {
+    // delta is +1 (faster) or -1 (slower)
+    const currentIdx = SPEED_LEVELS.indexOf(
+      SPEED_LEVELS.reduce((prev, curr) =>
+        Math.abs(curr - effectiveScrollSpeed) < Math.abs(prev - effectiveScrollSpeed) ? curr : prev
+      )
+    );
+    const newIdx = Math.max(0, Math.min(SPEED_LEVELS.length - 1, currentIdx + delta));
+    const newSpeed = SPEED_LEVELS[newIdx];
+    setScrollSpeed(newSpeed);
+    setSpeedDialLevel(newIdx);
+    setEffectiveScrollSpeed(newSpeed);
+    showControlBar();
+    // Bounce the dial
+    Animated.sequence([
+      Animated.spring(speedDialBounce, { toValue: 1.3, useNativeDriver: true, speed: 20 }),
+      Animated.spring(speedDialBounce, { toValue: 1, useNativeDriver: true, speed: 10 }),
+    ]).start();
+  }, [effectiveScrollSpeed, speedDialBounce, showControlBar]);
+
+  // Sync speedDialLevel when scrollSpeed prop changes externally
+  useEffect(() => {
+    const idx = SPEED_LEVELS.indexOf(scrollSpeed);
+    if (idx >= 0) setSpeedDialLevel(idx);
+  }, [scrollSpeed]);
+
+  // ── Speed dial tap cycle ─────────────────────────────────────────────────
+  const cycleSpeed = useCallback(() => {
+    const nextLevel = (speedDialLevel + 1) % SPEED_LEVELS.length;
+    const newSpeed = SPEED_LEVELS[nextLevel];
+    setSpeedDialLevel(nextLevel);
+    setScrollSpeed(newSpeed);
+    setEffectiveScrollSpeed(newSpeed);
+    showControlBar();
+    try { Haptics.selectionAsync(); } catch (_) {}
+    // Bounce animation
+    Animated.sequence([
+      Animated.spring(speedDialBounce, { toValue: 1.3, useNativeDriver: true, speed: 20 }),
+      Animated.spring(speedDialBounce, { toValue: 1, useNativeDriver: true, speed: 10 }),
+    ]).start();
+  }, [speedDialLevel, speedDialBounce, showControlBar]);
+
+  // Derived WPM estimate (rough: ~20 words per px/s at typical font size)
+  const estimatedWpm = Math.round(effectiveScrollSpeed * 20);
+
   const copyLogs = useCallback(async () => {
     const text = logsRef.current.join('\n') || '(no logs yet)';
     await Clipboard.setStringAsync(text);
@@ -665,54 +773,82 @@ export default function ReaderScreen() {
               scrollSpeed={scrollSpeed}
               onAutoScrollEnd={handleAutoScrollEnd}
               onLog={devMode ? handleLog : undefined}
+              onScrollSpeedChanged={handleScrollSpeedChanged}
+              onChapterProgress={handleChapterProgress}
+              onChapterTransition={handleChapterTransition}
+              onTapPause={handleTapPause}
+              onTapResume={handleTapResume}
+              onPeekBack={handlePeekBack}
+              swipeSpeedAdjust={autoScrollActive}
+              onSwipeSpeedAdjust={handleSwipeSpeedAdjust}
             />
-            {/* Floating prev-chapter button — bottom-left */}
-            <View style={styles.chapterNavLeft} pointerEvents="box-none">
+            {/* Floating chapter nav + auto-scroll controls — bottom */}
+            <Animated.View style={[styles.controlBar, { opacity: controlBarOpacity }]} pointerEvents="box-none">
+              {/* Prev chapter — left */}
               <Pressable
                 style={styles.chapterNavBtn}
-                onPress={() => { setAutoScrollActive(false); setEpubGoPrevRequest((v) => v + 1); }}
+                onPress={() => { setAutoScrollActive(false); setEpubGoPrevRequest((v) => v + 1); showControlBar(); }}
               >
                 <Text style={styles.chapterNavIcon}>‹</Text>
               </Pressable>
-            </View>
 
-            {/* Floating auto-scroll control — bottom-right of the reader */}
-            <View style={styles.autoScrollBar} pointerEvents="box-none">
+              {/* Center cluster: speed dial, WPM, play/pause */}
+              <View style={styles.controlCluster}>
+                {autoScrollActive && (
+                  <View style={styles.wpmContainer}>
+                    <Text style={styles.wpmLabel}>WPM</Text>
+                    <Text style={styles.wpmValue}>{estimatedWpm}</Text>
+                  </View>
+                )}
+
+                {/* Speed dial — single button that cycles speeds */}
+                <Animated.View style={{ transform: [{ scale: speedDialBounce }] }}>
+                  <Pressable
+                    style={[styles.speedDial, autoScrollActive && styles.speedDialActive]}
+                    onPress={cycleSpeed}
+                  >
+                    <Text style={styles.speedDialText}>
+                      {autoScrollActive ? SPEED_LEVELS[speedDialLevel] : '—'}
+                    </Text>
+                    {autoScrollActive && <Text style={styles.speedDialUnit}>px/s</Text>}
+                  </Pressable>
+                </Animated.View>
+
+                {/* Play/Pause */}
+                <Pressable
+                  style={[styles.autoScrollBtn, autoScrollActive && styles.autoScrollBtnActive]}
+                  onPress={() => { setAutoScrollActive((v) => !v); showControlBar(); }}
+                >
+                  <Text style={styles.autoScrollIcon}>{autoScrollActive ? '⏸' : '▶'}</Text>
+                </Pressable>
+              </View>
+
+              {/* Next chapter — right */}
               <Pressable
                 style={styles.chapterNavBtn}
-                onPress={() => { setAutoScrollActive(false); setEpubGoNextRequest((v) => v + 1); }}
+                onPress={() => { setAutoScrollActive(false); setEpubGoNextRequest((v) => v + 1); showControlBar(); }}
               >
                 <Text style={styles.chapterNavIcon}>›</Text>
               </Pressable>
-              {autoScrollActive && (
-                <>
-                  <Pressable
-                    style={[styles.autoScrollSpeedBtn, scrollSpeed === 30 && styles.autoScrollSpeedBtnActive]}
-                    onPress={() => setScrollSpeed(30)}
-                  >
-                    <Text style={styles.autoScrollSpeedText}>S</Text>
-                  </Pressable>
-                  <Pressable
-                    style={[styles.autoScrollSpeedBtn, scrollSpeed === 50 && styles.autoScrollSpeedBtnActive]}
-                    onPress={() => setScrollSpeed(50)}
-                  >
-                    <Text style={styles.autoScrollSpeedText}>M</Text>
-                  </Pressable>
-                  <Pressable
-                    style={[styles.autoScrollSpeedBtn, scrollSpeed === 90 && styles.autoScrollSpeedBtnActive]}
-                    onPress={() => setScrollSpeed(90)}
-                  >
-                    <Text style={styles.autoScrollSpeedText}>F</Text>
-                  </Pressable>
-                </>
-              )}
-              <Pressable
-                style={[styles.autoScrollBtn, autoScrollActive && styles.autoScrollBtnActive]}
-                onPress={() => setAutoScrollActive((v) => !v)}
-              >
-                <Text style={styles.autoScrollIcon}>{autoScrollActive ? '⏸' : '▶'}</Text>
-              </Pressable>
-            </View>
+            </Animated.View>
+
+            {/* Chapter progress ring — right edge */}
+            {autoScrollActive && (
+              <View style={styles.progressRingContainer} pointerEvents="none">
+                <View style={styles.progressRingTrack}>
+                  <View
+                    style={[
+                      styles.progressRingFill,
+                      { transform: [{ rotate: chapterProgressFraction * 360 + 'deg' }] },
+                    ]}
+                  />
+                  <View style={styles.progressRingCenter} />
+                </View>
+                <Text style={styles.progressPercent}>
+                  {Math.round(chapterProgressFraction * 100)}%
+                </Text>
+              </View>
+            )}
             {/* Compact audio strip while reading — if audio exists */}
             {canAudio && (
               <AudioPlayer
@@ -1140,12 +1276,6 @@ const styles = StyleSheet.create({
     ...typography.small,
     color: colors.textMuted,
   },
-  chapterNavLeft: {
-    position: 'absolute',
-    left: spacing.md,
-    bottom: spacing.lg,
-    zIndex: 20,
-  },
   chapterNavBtn: {
     width: 44,
     height: 44,
@@ -1161,15 +1291,116 @@ const styles = StyleSheet.create({
     color: colors.text,
     lineHeight: 26,
   },
-  autoScrollBar: {
+  // ── Control bar (auto-hiding) ───────────────────────────────────────────
+  controlBar: {
     position: 'absolute',
-    right: spacing.md,
+    left: 0,
+    right: 0,
     bottom: spacing.lg,
     flexDirection: 'row',
-    alignItems: 'center',
-    gap: spacing.xs,
+    alignItems: 'flex-end',
+    justifyContent: 'space-between',
+    paddingHorizontal: spacing.md,
     zIndex: 20,
   },
+  controlCluster: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+  },
+  // ── Speed dial ───────────────────────────────────────────────────────────
+  speedDial: {
+    width: 48,
+    height: 48,
+    borderRadius: 24,
+    backgroundColor: 'rgba(30,20,50,0.85)',
+    borderWidth: 1.5,
+    borderColor: colors.border,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  speedDialActive: {
+    borderColor: colors.primaryLight,
+  },
+  speedDialText: {
+    fontSize: 16,
+    fontWeight: '800',
+    color: colors.text,
+    fontVariant: ['tabular-nums'],
+    lineHeight: 20,
+  },
+  speedDialUnit: {
+    fontSize: 9,
+    fontWeight: '600',
+    color: colors.textMuted,
+    marginTop: -2,
+  },
+  // ── WPM indicator ────────────────────────────────────────────────────────
+  wpmContainer: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(30,20,50,0.75)',
+    borderRadius: radius.sm,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: spacing.xs,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  wpmLabel: {
+    fontSize: 9,
+    fontWeight: '600',
+    color: colors.textMuted,
+    letterSpacing: 1,
+    textTransform: 'uppercase',
+  },
+  wpmValue: {
+    fontSize: 15,
+    fontWeight: '800',
+    color: colors.accent,
+    fontVariant: ['tabular-nums'],
+  },
+  // ── Chapter progress ring ────────────────────────────────────────────────
+  progressRingContainer: {
+    position: 'absolute',
+    right: spacing.xs,
+    top: '40%',
+    zIndex: 10,
+    alignItems: 'center',
+    gap: 2,
+  },
+  progressRingTrack: {
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    borderWidth: 3,
+    borderColor: 'rgba(124,58,237,0.25)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  progressRingFill: {
+    position: 'absolute',
+    top: -3,
+    left: -3,
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    borderWidth: 3,
+    borderColor: 'transparent',
+    borderTopColor: colors.primary,
+  },
+  progressRingCenter: {
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+    backgroundColor: colors.surface,
+  },
+  progressPercent: {
+    fontSize: 9,
+    fontWeight: '700',
+    color: colors.textMuted,
+    fontVariant: ['tabular-nums'],
+  },
+  // ── Shared control buttons ───────────────────────────────────────────────
   autoScrollBtn: {
     width: 44,
     height: 44,
@@ -1187,26 +1418,7 @@ const styles = StyleSheet.create({
   autoScrollIcon: {
     fontSize: 18,
     color: colors.white,
-  },
-  autoScrollSpeedBtn: {
-    width: 34,
-    height: 34,
-    borderRadius: 17,
-    backgroundColor: 'rgba(30,20,50,0.75)',
-    borderWidth: 1,
-    borderColor: colors.border,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  autoScrollSpeedBtnActive: {
-    borderColor: colors.primaryLight,
-  },
-  autoScrollSpeedText: {
-    fontSize: 13,
-    fontWeight: '700',
-    color: colors.text,
-  },
-});
+  },});
 
 // ────────────────────────────────────────────────────────────
 // Real-time log viewer (tail -f style)
