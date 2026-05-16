@@ -13,9 +13,9 @@ const MOCK_MAP: PositionMap = {
   createdAt: 1_700_000_000_000,
   totalAudioMs: 3_600_000,
   anchors: [
-    { audioMs: 0, chapterIndex: 0 },
-    { audioMs: 30_000, chapterIndex: 1 },
-    { audioMs: 60_000, chapterIndex: 2 },
+    { audioMs: 0, chapterIndex: 0, fileIndex: 0, fileSeconds: 0, withinChapterFraction: 0, source: 'proportional' as const },
+    { audioMs: 30_000, chapterIndex: 1, fileIndex: 0, fileSeconds: 0, withinChapterFraction: 0, source: 'proportional' as const },
+    { audioMs: 60_000, chapterIndex: 2, fileIndex: 0, fileSeconds: 0, withinChapterFraction: 0, source: 'proportional' as const },
   ],
 };
 
