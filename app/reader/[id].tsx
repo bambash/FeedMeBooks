@@ -70,7 +70,7 @@ export default function ReaderScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
 
-  const { getBook, updateEbookPosition, updateAudioPosition, updateAudioFileDuration, setLastMode, setSyncMapCreatedAt } =
+  const { getBook, updateEbookPosition, updateAudioPosition, updateAudioFileDuration, setLastMode, setPositionMapCreatedAt } =
     useLibraryStore();
   const book = getBook(id);
 
@@ -367,7 +367,7 @@ export default function ReaderScreen() {
         await saveSyncMap(map);
         await deleteTranscriptionCache(b.id);
         await saveChapterTexts(b.id, chapters);
-        setSyncMapCreatedAt(b.id, map.createdAt);
+        setPositionMapCreatedAt(b.id, map.createdAt);
 
         // Promote the Whisper-based SyncMap to a live PositionMap
         const posMap: PositionMap = {
@@ -391,7 +391,7 @@ export default function ReaderScreen() {
           });
       }
     },
-    [setSyncMapCreatedAt, handleLog],
+    [setPositionMapCreatedAt, handleLog],
   );
 
   /** Lazy-init the PositionMap: try to load from storage, fall back to legacy
@@ -465,10 +465,10 @@ export default function ReaderScreen() {
       deleteTranscriptionCache(b.id),
       deleteChapterTexts(b.id),
     ]);
-    setSyncMapCreatedAt(b.id, undefined);
+    setPositionMapCreatedAt(b.id, undefined);
     setPositionMap(null);
     setIndexStatus(null);
-  }, [setSyncMapCreatedAt]);
+  }, [setPositionMapCreatedAt]);
 
   /** Derive fileIndex and fileSeconds from a global audioMs value
    *  using the actual (session) file durations. */
@@ -736,7 +736,7 @@ export default function ReaderScreen() {
           onCopyLogs={copyLogs}
           onViewLogs={() => setShowLogViewer(true)}
           canBuildIndex={canEbook && canAudio && mode === 'ebook'}
-          syncMapCreatedAt={book.session.syncMapCreatedAt}
+          syncMapCreatedAt={book.session.positionMapCreatedAt}
           indexStatus={indexStatus}
           onBuildIndex={startBuildIndex}
           onRebuildIndex={handleRebuildIndex}

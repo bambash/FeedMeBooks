@@ -64,7 +64,7 @@ export interface PositionAnchor {
   /** 0–1 position within the chapter (reserved for future fine-grained sync) */
   withinChapterFraction: number;
   /** How this anchor was derived */
-  source: 'proportional' | 'transcript';
+  source?: 'proportional' | 'transcript';
 }
 
 /** Position map for an audiobook+ebook pair, stored separately in AsyncStorage */
@@ -74,6 +74,8 @@ export interface PositionMap {
   totalAudioMs: number;
   /** Sorted ascending by audioMs */
   anchors: PositionAnchor[];
+  /** Whether this was migrated from a legacy SyncMap */
+  migratedFromSyncMap?: boolean;
 }
 
 /** @deprecated Use PositionAnchor instead */
@@ -97,17 +99,6 @@ export interface SyncMap {
   totalAudioMs: number;
   /** Sorted ascending by audioMs */
   points: SyncPoint[];
-}
-
-/** Live, progressively refined position map (replaces SyncMap).
- *  Starts with proportional anchors (no Whisper needed) and improves
- *  as the user confirms mode switches. */
-export interface PositionMap {
-  bookId: string;
-  /** Sorted ascending by audioMs */
-  anchors: SyncPoint[];
-  /** Whether this was migrated from a legacy SyncMap */
-  migratedFromSyncMap?: boolean;
 }
 
 export interface Book {
