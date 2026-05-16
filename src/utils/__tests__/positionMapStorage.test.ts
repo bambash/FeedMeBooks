@@ -1,6 +1,6 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { savePositionMap, loadPositionMap, deletePositionMap } from '../positionMapStorage';
-import type { PositionMap } from '../positionMapStorage';
+import type { PositionMap } from '../../types';
 
 jest.mock('@react-native-async-storage/async-storage', () => ({
   setItem: jest.fn(),
