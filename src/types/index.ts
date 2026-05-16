@@ -74,6 +74,17 @@ export interface SyncMap {
   points: SyncPoint[];
 }
 
+/** Live, progressively refined position map (replaces SyncMap).
+ *  Starts with proportional anchors (no Whisper needed) and improves
+ *  as the user confirms mode switches. */
+export interface PositionMap {
+  bookId: string;
+  /** Sorted ascending by audioMs */
+  anchors: SyncPoint[];
+  /** Whether this was migrated from a legacy SyncMap */
+  migratedFromSyncMap?: boolean;
+}
+
 export interface Book {
   id: string;
   title: string;

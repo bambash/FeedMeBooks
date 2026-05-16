@@ -281,3 +281,103 @@ export function findChapterByWindowText(
   return bestScore >= 0.25 ? bestChapter : null;
 }
 
+// ─── PositionMap helpers ───────────────────────────────────────────────────────
+
+/**
+ * Create proportional anchors from chapter texts and total audio duration.
+ * Each content chapter gets one anchor equally spaced on the timeline.
+ * No Whisper needed — this is a lightweight bootstrap for the PositionMap.
+ */
+export function createProportionalAnchors(
+  chapters: ChapterText[],
+  totalAudioMs: number,
+): SyncPoint[] {
+  const contentChapters = chapters.filter((c) => c.text.trim().length >= 500);
+  if (!contentChapters.length || totalAudioMs <= 0) return [];
+
+  const n = contentChapters.length;
+  return contentChapters.map((ch, i) => ({
+    audioMs: Math.round((i / n) * totalAudioMs),
+    fileIndex: 0,
+    fileSeconds: 0,
+    chapterIndex: ch.chapterIndex,
+    withinChapterFraction: 0,
+  }));
+}
+
+/**
+ * Interpolate a canonical (chapterIndex, withinChapterFraction) position
+ * from an audio time using the PositionMap anchors.
+ * Returns null if anchors is empty.
+ */
+export function interpolateCanonical(
+  anchors: SyncPoint[],
+  audioMs: number,
+): { chapterIndex: number; withinChapterFraction: number } | null {
+  if (!anchors.length) return null;
+
+  if (audioMs <= anchors[0].audioMs) {
+    return { chapterIndex: anchors[0].chapterIndex, withinChapterFraction: 0 };
+  }
+
+  const last = anchors[anchors.length - 1];
+  if (audioMs >= last.audioMs) {
+    return { chapterIndex: last.chapterIndex, withinChapterFraction: 1 };
+  }
+
+  // Find the two anchors that surround audioMs
+  let lo = 0;
+  for (let i = 0; i < anchors.length - 1; i++) {
+    if (anchors[i].audioMs <= audioMs && audioMs <= anchors[i + 1].audioMs) {
+      lo = i;
+      break;
+    }
+  }
+
+  const hi = lo + 1;
+  const t = (audioMs - anchors[lo].audioMs) / (anchors[hi].audioMs - anchors[lo].audioMs);
+  return { chapterIndex: anchors[lo].chapterIndex, withinChapterFraction: t };
+}
+
+/**
+ * Interpolate an audio time (ms) from a canonical (chapterIndex, withinChapterFraction)
+ * position using the PositionMap anchors.
+ * Returns null if anchors is empty.
+ */
+export function interpolateAudioMs(
+  anchors: SyncPoint[],
+  chapterIndex: number,
+  withinChapterFraction: number,
+): number | null {
+  if (!anchors.length) return null;
+
+  // Find the first anchor whose chapterIndex >= the target
+  const idx = anchors.findIndex((a) => a.chapterIndex >= chapterIndex);
+  if (idx === -1) return anchors[anchors.length - 1].audioMs;
+
+  if (withinChapterFraction <= 0 || idx >= anchors.length - 1) {
+    return anchors[idx].audioMs;
+  }
+
+  const lo = idx;
+  const hi = idx + 1;
+  return anchors[lo].audioMs + withinChapterFraction * (anchors[hi].audioMs - anchors[lo].audioMs);
+}
+
+/**
+ * Add a confirmed anchor (from a user-accepted mode switch) to the anchor list.
+ * Replaces any existing anchor for the same chapterIndex and maintains sorted order.
+ */
+export function addConfirmedAnchor(
+  anchors: SyncPoint[],
+  audioMs: number,
+  chapterIndex: number,
+  withinChapterFraction: number,
+): SyncPoint[] {
+  const anchor: SyncPoint = { audioMs, fileIndex: 0, fileSeconds: 0, chapterIndex, withinChapterFraction };
+  const filtered = anchors.filter((a) => a.chapterIndex !== chapterIndex);
+  const result = [...filtered, anchor];
+  result.sort((a, b) => a.audioMs - b.audioMs);
+  return result;
+}
+
