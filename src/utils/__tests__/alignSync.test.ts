@@ -1,470 +1,450 @@
 import {
-  buildSyncPoints,
-  buildSyncPointsFromTranscripts,
-  fillFilePositions,
-  lookupByAudio,
-  lookupByChapter,
-  createInitialAnchors,
-  addConfirmedAnchor,
-  interpolateCanonical,
-  interpolateAudioMs,
+  buildChapterAnchors,
+  chapterPositionToAudioMs,
+  audioMsToChapterPosition,
+  deriveBuiltFrom,
+  msToFilePosition,
+  percentageToAudioMs,
+  audioMsToPercentage,
+  refineChapterAnchor,
   type ChapterText,
-  type Anchor,
 } from '../alignSync';
-import type { PositionAnchor } from '../../types';
-import type { TranscribeSegment } from '../transcribeAudio';
 
-// ─── helpers ────────────────────────────────────────────────────────────────
-
-function seg(t0Ms: number, t1Ms: number, text: string): TranscribeSegment {
-  return { t0Ms, t1Ms, text };
+function chapter(chapterIndex: number, text: string): ChapterText {
+  return { chapterIndex, text };
 }
 
-function pt(audioMs: number, chapterIndex: number): PositionAnchor {
-  return { audioMs, fileIndex: 0, fileSeconds: 0, chapterIndex, withinChapterFraction: 0, source: 'proportional' };
+function textOfLength(prefix: string, totalLength: number): string {
+  const filler = 'lorem ipsum dolor sit amet consectetur adipiscing elit ';
+  let text = prefix;
+  while (text.length < totalLength) text += filler;
+  return text.slice(0, totalLength);
 }
 
-// ─── buildSyncPoints ─────────────────────────────────────────────────────────
+function contentChapter(chapterIndex: number, opener: string, totalLength = 1200): ChapterText {
+  return chapter(chapterIndex, textOfLength(`${opener} `, totalLength));
+}
 
-describe('buildSyncPoints', () => {
-  it('returns empty array when chapters are empty', () => {
-    const segments: TranscribeSegment[] = [seg(0, 500, 'hello')];
-    expect(buildSyncPoints(segments, [], 60_000)).toEqual([]);
-  });
+function wordStream(startMs: number, words: string[], stepMs = 1): { audioMs: number; text: string }[] {
+  return words.map((text, index) => ({ audioMs: startMs + index * stepMs, text }));
+}
 
-  it('returns empty array when all chapters have empty text', () => {
-    const chapters: ChapterText[] = [
-      { chapterIndex: 0, text: '' },
-      { chapterIndex: 1, text: '   ' },
+function anchor(
+  chapterIndex: number,
+  withinChapterFraction: number,
+  audioMs: number,
+  source: 'forced-alignment' | 'proportional-fallback' | 'confirmed' = 'proportional-fallback',
+  confidence?: number,
+): ReturnType<typeof refineChapterAnchor>[number] {
+  const result = { chapterIndex, withinChapterFraction, audioMs, source } as any;
+  if (confidence != null) result.confidence = confidence;
+  return result;
+}
+
+function canonicalKeyOf(a: { chapterIndex: number; withinChapterFraction: number }): number {
+  return a.chapterIndex + a.withinChapterFraction;
+}
+
+function expectStrictAscending(anchors: { chapterIndex: number; withinChapterFraction: number; audioMs: number }[]): void {
+  for (let i = 1; i < anchors.length; i++) {
+    expect(anchors[i].audioMs).toBeGreaterThan(anchors[i - 1].audioMs);
+    expect(canonicalKeyOf(anchors[i])).toBeGreaterThan(canonicalKeyOf(anchors[i - 1]));
+  }
+}
+
+describe('buildChapterAnchors', () => {
+  it('excludes non-content dividers', () => {
+    const chapters = [
+      contentChapter(5, 'alpha one two three four five six seven eight nine ten eleven twelve'),
+      chapter(6, 'Part Two'),
+      contentChapter(7, 'theta one two three four five six seven eight nine ten eleven twelve'),
     ];
-    expect(buildSyncPoints([], chapters, 60_000)).toEqual([]);
-  });
-
-  it('skips chapters with text shorter than 500 chars', () => {
-    const chapters: ChapterText[] = [
-      { chapterIndex: 0, text: '' },               // empty — skipped
-      { chapterIndex: 1, text: 'short header' },    // < 500 chars — skipped (part headers etc.)
-      { chapterIndex: 2, text: 'a'.repeat(500) },   // exactly 500 — kept
+    const transcriptWords = [
+      ...wordStream(0, 'alpha one two three four five six seven eight nine ten eleven twelve'.split(' ')),
+      ...wordStream(3_000_000, 'theta one two three four five six seven eight nine ten eleven twelve'.split(' ')),
     ];
-    const points = buildSyncPoints([], chapters, 60_000);
-    expect(points).toHaveLength(1);
-    expect(points[0].chapterIndex).toBe(2);
+
+    const anchors = buildChapterAnchors(transcriptWords, chapters, 6_000_000);
+    expect(anchors.map((anchor) => anchor.chapterIndex)).toEqual([5, 7]);
   });
 
-  it('maps a single chapter to audioMs=0', () => {
-    const chapters: ChapterText[] = [{ chapterIndex: 0, text: 'a'.repeat(500) }];
-    const points = buildSyncPoints([], chapters, 60_000);
-    expect(points).toHaveLength(1);
-    expect(points[0]).toMatchObject({ audioMs: 0, chapterIndex: 0, fileIndex: 0 });
+  it('returns an empty list when every chapter is below threshold', () => {
+    const chapters = [chapter(0, 'short'), chapter(1, 'also short')];
+    expect(buildChapterAnchors([], chapters, 60_000)).toEqual([]);
   });
 
-  it('divides audio time proportionally by chapter text length', () => {
-    // ch0 = 1000 chars, ch1 = 3000 chars → ch0 gets first 25%, ch1 gets remaining 75%
-    const chapters: ChapterText[] = [
-      { chapterIndex: 0, text: 'a'.repeat(1000) },
-      { chapterIndex: 1, text: 'b'.repeat(3000) },
+  it('creates a forced-alignment anchor for a confident match', () => {
+    const opener = 'alpha one two three four five six seven eight nine ten eleven twelve';
+    const chapters = [contentChapter(12, opener, 1200)];
+    const transcriptWords = wordStream(1_830_000, opener.split(' '));
+
+    const anchors = buildChapterAnchors(transcriptWords, chapters, 20_000_000);
+    expect(anchors).toEqual([
+      {
+        chapterIndex: 12,
+        withinChapterFraction: 0,
+        audioMs: 1_830_000,
+        source: 'forced-alignment',
+        confidence: 1,
+      },
+    ]);
+    expect(deriveBuiltFrom(anchors)).toBe('transcript');
+  });
+
+  it('falls back proportionally when the best score is below threshold', () => {
+    const opener = 'gamma one two three four five six seven eight nine ten eleven twelve';
+    const chapters = [
+      contentChapter(0, 'alpha one two three four five six seven eight nine ten eleven twelve'),
+      contentChapter(1, opener),
     ];
-    const points = buildSyncPoints([], chapters, 100_000);
-    expect(points).toHaveLength(2);
-    expect(points[0]).toMatchObject({ audioMs: 0, chapterIndex: 0 });
-    expect(points[1]).toMatchObject({ audioMs: 25_000, chapterIndex: 1 });
+    const transcriptWords = [
+      ...wordStream(0, 'alpha one two three four five six seven eight nine ten eleven twelve'.split(' ')),
+      ...wordStream(2_700_000, 'gamma one two three mismatch mismatch mismatch mismatch'.split(' ')),
+    ];
+
+    const anchors = buildChapterAnchors(transcriptWords, chapters, 6_000_000);
+    expect(anchors[1]).toMatchObject({
+      chapterIndex: 1,
+      withinChapterFraction: 0,
+      audioMs: 3_000_000,
+      source: 'proportional-fallback',
+    });
+    expect(anchors[1].confidence).toBeUndefined();
   });
 
-  it('produces one point per substantive chapter in ascending audioMs order', () => {
-    const chapters: ChapterText[] = [
-      { chapterIndex: 0, text: 'a'.repeat(1000) },
-      { chapterIndex: 1, text: '' },              // empty — skipped
-      { chapterIndex: 2, text: 'b'.repeat(2000) },
-      { chapterIndex: 3, text: 'c'.repeat(1000) },
+  it('searches a one-sided window for the first content chapter', () => {
+    const opener = 'delta one two three four five six seven eight nine ten eleven twelve';
+    const chapters = [contentChapter(3, opener)];
+    const transcriptWords = [
+      ...wordStream(0, 'publisher lead in no match at all'.split(' '), 5_000),
+      ...wordStream(45_000, opener.split(' ')),
     ];
-    const points = buildSyncPoints([], chapters, 120_000);
-    expect(points).toHaveLength(3);
-    const indices = points.map((p) => p.chapterIndex);
-    expect(indices).toEqual([0, 2, 3]);
-    // Ascending audioMs
-    for (let i = 1; i < points.length; i++) {
-      expect(points[i].audioMs).toBeGreaterThan(points[i - 1].audioMs);
+
+    const anchors = buildChapterAnchors(transcriptWords, chapters, 300_000);
+    expect(anchors[0]).toMatchObject({
+      chapterIndex: 3,
+      withinChapterFraction: 0,
+      audioMs: 45_000,
+      source: 'forced-alignment',
+    });
+  });
+
+  it('rejects backward matches and keeps the map strictly ascending', () => {
+    const opener8 = 'theta one two three four five six seven eight nine ten eleven twelve';
+    const opener9 = 'sigma one two three four five six seven eight nine ten eleven twelve';
+    const chapters = [contentChapter(8, opener8, 1450), contentChapter(9, opener9, 8550)];
+    const transcriptWords = [
+      ...wordStream(3_000_000, opener8.split(' ')),
+      ...wordStream(2_900_000, opener9.split(' ')),
+    ];
+
+    const anchors = buildChapterAnchors(transcriptWords, chapters, 20_000_000);
+    expect(anchors).toEqual([
+      {
+        chapterIndex: 8,
+        withinChapterFraction: 0,
+        audioMs: 3_000_000,
+        source: 'forced-alignment',
+        confidence: 1,
+      },
+      {
+        chapterIndex: 9,
+        withinChapterFraction: 0,
+        audioMs: 3_000_001,
+        source: 'proportional-fallback',
+      },
+    ]);
+  });
+
+  it('reports builtFrom unavailable when every anchor falls back', () => {
+    const chapters = [contentChapter(0, 'alpha one two three four five six seven eight nine ten eleven twelve')];
+    const transcriptWords = wordStream(10_000, 'nothing matches here at all'.split(' '));
+
+    const anchors = buildChapterAnchors(transcriptWords, chapters, 60_000);
+    expect(anchors).toEqual([
+      {
+        chapterIndex: 0,
+        withinChapterFraction: 0,
+        audioMs: 0,
+        source: 'proportional-fallback',
+      },
+    ]);
+    expect(deriveBuiltFrom(anchors)).toBe('unavailable');
+  });
+});
+
+describe('chapterPositionToAudioMs', () => {
+  it('interpolates between adjacent canonical keys', () => {
+    const anchors = [
+      { chapterIndex: 5, withinChapterFraction: 0, audioMs: 3_000_000, source: 'proportional-fallback' as const },
+      { chapterIndex: 6, withinChapterFraction: 0, audioMs: 3_600_000, source: 'proportional-fallback' as const },
+    ];
+
+    expect(chapterPositionToAudioMs(anchors, { chapterIndex: 5, withinChapterFraction: 0.5 })).toBe(3_300_000);
+  });
+
+  it('interpolates a position inside a non-content divider', () => {
+    const anchors = [
+      { chapterIndex: 5, withinChapterFraction: 0, audioMs: 3_000_000, source: 'proportional-fallback' as const },
+      { chapterIndex: 7, withinChapterFraction: 0, audioMs: 4_000_000, source: 'proportional-fallback' as const },
+    ];
+
+    expect(chapterPositionToAudioMs(anchors, { chapterIndex: 6, withinChapterFraction: 0 })).toBe(3_500_000);
+  });
+
+  it('clamps front matter to the first anchor', () => {
+    const anchors = [
+      { chapterIndex: 2, withinChapterFraction: 0, audioMs: 60_000, source: 'proportional-fallback' as const },
+      { chapterIndex: 3, withinChapterFraction: 0, audioMs: 120_000, source: 'proportional-fallback' as const },
+    ];
+
+    expect(chapterPositionToAudioMs(anchors, { chapterIndex: 0, withinChapterFraction: 0.9 })).toBe(60_000);
+  });
+
+  it('returns the last anchor for a single-anchor map', () => {
+    const anchors = [
+      { chapterIndex: 3, withinChapterFraction: 0, audioMs: 500_000, source: 'proportional-fallback' as const },
+    ];
+
+    expect(chapterPositionToAudioMs(anchors, { chapterIndex: 3, withinChapterFraction: 0.42 })).toBe(500_000);
+  });
+
+  it('uses t = 0 for a zero-length audio bracket', () => {
+    const anchors = [
+      { chapterIndex: 5, withinChapterFraction: 0, audioMs: 1_000_000, source: 'proportional-fallback' as const },
+      { chapterIndex: 6, withinChapterFraction: 0, audioMs: 1_000_000, source: 'proportional-fallback' as const },
+    ];
+
+    expect(chapterPositionToAudioMs(anchors, { chapterIndex: 5, withinChapterFraction: 0.5 })).toBe(1_000_000);
+  });
+
+  it('round-trips stable positions within the anchored range', () => {
+    const anchors = [
+      { chapterIndex: 5, withinChapterFraction: 0, audioMs: 3_000_000, source: 'proportional-fallback' as const },
+      { chapterIndex: 5, withinChapterFraction: 0.5, audioMs: 3_400_000, source: 'confirmed' as const },
+      { chapterIndex: 6, withinChapterFraction: 0, audioMs: 3_600_000, source: 'proportional-fallback' as const },
+    ];
+
+    for (const position of [
+      { chapterIndex: 5, withinChapterFraction: 0.25 },
+      { chapterIndex: 5, withinChapterFraction: 0.75 },
+    ]) {
+      const audioMs = chapterPositionToAudioMs(anchors, position);
+      const roundTripped = audioMsToChapterPosition(anchors, audioMs);
+      expect(roundTripped.chapterIndex).toBe(position.chapterIndex);
+      expect(roundTripped.withinChapterFraction).toBeCloseTo(position.withinChapterFraction, 9);
     }
   });
+});
 
-  it('falls back to segment-derived duration when totalMs is 0', () => {
-    const chapters: ChapterText[] = [
-      { chapterIndex: 0, text: 'a'.repeat(1000) },
-      { chapterIndex: 1, text: 'b'.repeat(1000) },
+describe('audioMsToChapterPosition', () => {
+  it('returns the expected midpoint between chapter anchors', () => {
+    const anchors = [
+      { chapterIndex: 5, withinChapterFraction: 0, audioMs: 3_000_000, source: 'proportional-fallback' as const },
+      { chapterIndex: 6, withinChapterFraction: 0, audioMs: 3_600_000, source: 'proportional-fallback' as const },
     ];
-    // Last segment ends at 80_000 ms → that becomes effectiveTotalMs
-    const segments: TranscribeSegment[] = [seg(0, 40_000, 'x'), seg(40_000, 80_000, 'y')];
-    const points = buildSyncPoints(segments, chapters, 0);
-    expect(points).toHaveLength(2);
-    expect(points[0].audioMs).toBe(0);
-    expect(points[1].audioMs).toBe(40_000); // 50% of 80_000
-  });
-});
 
-// ─── fillFilePositions ───────────────────────────────────────────────────────
-
-describe('fillFilePositions', () => {
-  it('puts points within the first file when durations cover them', () => {
-    const points = [pt(0, 0), pt(30_000, 1)];
-    const filled = fillFilePositions(points, [60_000]);
-    expect(filled[0]).toMatchObject({ fileIndex: 0, fileSeconds: 0 });
-    expect(filled[1]).toMatchObject({ fileIndex: 0, fileSeconds: 30 });
+    expect(audioMsToChapterPosition(anchors, 3_450_000)).toEqual({ chapterIndex: 5, withinChapterFraction: 0.75 });
   });
 
-  it('rolls over to the second file correctly', () => {
-    const points = [pt(0, 0), pt(50_000, 1), pt(90_000, 2)];
-    // File 0 = 60 s, File 1 = 60 s
-    const filled = fillFilePositions(points, [60_000, 60_000]);
-    expect(filled[0]).toMatchObject({ fileIndex: 0, fileSeconds: 0 });
-    expect(filled[1]).toMatchObject({ fileIndex: 0, fileSeconds: 50 });
-    expect(filled[2]).toMatchObject({ fileIndex: 1, fileSeconds: 30 });
-  });
-
-  it('clamps past-end point to last file', () => {
-    const points = [pt(999_000, 5)];
-    const filled = fillFilePositions(points, [60_000]);
-    expect(filled[0].fileIndex).toBe(0);
-  });
-});
-
-// ─── lookupByAudio ───────────────────────────────────────────────────────────
-
-describe('lookupByAudio', () => {
-  const points: PositionAnchor[] = [
-    pt(0, 0),
-    pt(30_000, 1),
-    pt(60_000, 2),
-  ];
-
-  it('returns null for empty array', () => {
-    expect(lookupByAudio([], 5_000)).toBeNull();
-  });
-
-  it('returns the first point for t=0', () => {
-    expect(lookupByAudio(points, 0)).toBe(points[0]);
-  });
-
-  it('returns exact match', () => {
-    expect(lookupByAudio(points, 30_000)).toBe(points[1]);
-  });
-
-  it('returns floor point (largest audioMs ≤ query)', () => {
-    expect(lookupByAudio(points, 45_000)).toBe(points[1]);
-    expect(lookupByAudio(points, 29_999)).toBe(points[0]);
-  });
-
-  it('returns last point for time past all points', () => {
-    expect(lookupByAudio(points, 999_000)).toBe(points[2]);
-  });
-});
-
-// ─── lookupByChapter ─────────────────────────────────────────────────────────
-
-describe('lookupByChapter', () => {
-  const points: PositionAnchor[] = [pt(0, 0), pt(30_000, 2), pt(60_000, 4)];
-
-  it('returns null for empty array', () => {
-    expect(lookupByChapter([], 1)).toBeNull();
-  });
-
-  it('finds an exact chapter match', () => {
-    expect(lookupByChapter(points, 2)).toBe(points[1]);
-  });
-
-  it('finds the first point whose chapter >= target', () => {
-    expect(lookupByChapter(points, 1)).toBe(points[1]); // ch2 ≥ 1
-    expect(lookupByChapter(points, 3)).toBe(points[2]); // ch4 ≥ 3
-  });
-
-  it('returns last point when chapter exceeds all', () => {
-    expect(lookupByChapter(points, 99)).toBe(points[2]);
-  });
-});
-
-// ─── buildSyncPointsFromTranscripts ─────────────────────────────────────────
-
-describe('buildSyncPointsFromTranscripts', () => {
-  // Build chapter texts with unique vocabulary so matching is unambiguous
-  const chapters: ChapterText[] = [
-    { chapterIndex: 5, text: ('kaladin stormblessed bridge four lopen rock syl ').repeat(100) },
-    { chapterIndex: 10, text: ('shallan davar jasnah kholin pattern cryptic lightweaving ').repeat(100) },
-    { chapterIndex: 15, text: ('dalinar kholin adolin renarin highprince codes urithiru ').repeat(100) },
-  ];
-  const durs = [60_000, 60_000, 60_000];
-
-  it('assigns each file to the chapter whose vocabulary best matches', () => {
-    const transcripts = [
-      'kaladin lopen rock ran across the bridge four times today',
-      'shallan drew jasnah pattern cryptic lightweaving the boat',
-      'dalinar adolin renarin highprince codes the tower urithiru',
+  it('brackets a confirmed interior anchor correctly', () => {
+    const anchors = [
+      { chapterIndex: 5, withinChapterFraction: 0, audioMs: 3_000_000, source: 'proportional-fallback' as const },
+      { chapterIndex: 5, withinChapterFraction: 0.5, audioMs: 3_400_000, source: 'confirmed' as const },
+      { chapterIndex: 6, withinChapterFraction: 0, audioMs: 3_600_000, source: 'proportional-fallback' as const },
     ];
-    const pts = buildSyncPointsFromTranscripts(transcripts, durs, chapters);
-    expect(pts).toHaveLength(3);
-    expect(pts[0].chapterIndex).toBe(5);
-    expect(pts[1].chapterIndex).toBe(10);
-    expect(pts[2].chapterIndex).toBe(15);
+
+    expect(audioMsToChapterPosition(anchors, 3_500_000)).toEqual({ chapterIndex: 5, withinChapterFraction: 0.75 });
   });
 
-  it('sets audioMs to cumulative file start time', () => {
-    const transcripts = ['kaladin bridge lopen rock syl', '', ''];
-    const pts = buildSyncPointsFromTranscripts(transcripts, durs, chapters);
-    expect(pts[0].audioMs).toBe(0);
-    expect(pts[1].audioMs).toBe(60_000);
-    expect(pts[2].audioMs).toBe(120_000);
-  });
-
-  it('holds chapter assignment for empty/silent files', () => {
-    // file 0 matches ch5, file 1 is empty → should keep ch5
-    const transcripts = ['kaladin bridge lopen rock syl stormblessed', '', ''];
-    const pts = buildSyncPointsFromTranscripts(transcripts, durs, chapters);
-    expect(pts[1].chapterIndex).toBe(5);
-  });
-
-  it('enforces monotonic chapter ordering', () => {
-    // file 1 transcript matches ch5 (an earlier chapter) — should stay at ch10
-    const transcripts = [
-      'shallan jasnah pattern cryptic lightweaving',  // → ch10
-      'kaladin bridge lopen rock syl',                // words from ch5, but ch5 < ch10 → skip
-      'dalinar adolin renarin urithiru codes',        // → ch15
+  it('clamps overshoot to the last anchor with fraction 1', () => {
+    const anchors = [
+      { chapterIndex: 2, withinChapterFraction: 0, audioMs: 60_000, source: 'proportional-fallback' as const },
+      { chapterIndex: 3, withinChapterFraction: 0, audioMs: 120_000, source: 'proportional-fallback' as const },
     ];
-    const pts = buildSyncPointsFromTranscripts(transcripts, durs, chapters);
-    expect(pts[0].chapterIndex).toBe(10);
-    expect(pts[1].chapterIndex).toBe(10); // held, not regressed to ch5
-    expect(pts[2].chapterIndex).toBe(15);
+
+    expect(audioMsToChapterPosition(anchors, 120_004)).toEqual({ chapterIndex: 3, withinChapterFraction: 1 });
   });
 
-  it('returns empty array when chapters is empty', () => {
-    expect(buildSyncPointsFromTranscripts(['hello world'], [60_000], [])).toEqual([]);
-  });
-});
+  it('returns the single anchor in both directions', () => {
+    const anchors = [
+      { chapterIndex: 3, withinChapterFraction: 0, audioMs: 500_000, source: 'proportional-fallback' as const },
+    ];
 
-// ─── Anchor helpers ─────────────────────────────────────────────────────────────
-
-function anc(audioMs: number, chapterIndex: number): Anchor {
-  return { audioMs, chapterIndex };
-}
-
-function ch(index: number, text: string): { chapterIndex: number; text: string } {
-  return { chapterIndex: index, text };
-}
-
-function ch500(index: number): { chapterIndex: number; text: string } {
-  return ch(index, 'x'.repeat(500));
-}
-
-// ─── createInitialAnchors ──────────────────────────────────────────────────────
-
-describe('createInitialAnchors', () => {
-  it('returns empty array for empty chapters', () => {
-    expect(createInitialAnchors([], 60_000)).toEqual([]);
+    expect(audioMsToChapterPosition(anchors, 500_000)).toEqual({ chapterIndex: 3, withinChapterFraction: 0 });
   });
 
-  it('returns empty array when totalAudioMs is 0', () => {
-    const chapters = [{ chapterIndex: 0, text: 'a'.repeat(500) }];
-    expect(createInitialAnchors(chapters, 0)).toEqual([]);
-  });
+  it('uses the left entry for a corrupted zero-length bracket', () => {
+    const anchors = [
+      { chapterIndex: 5, withinChapterFraction: 0, audioMs: 1_000_000, source: 'proportional-fallback' as const },
+      { chapterIndex: 6, withinChapterFraction: 0, audioMs: 1_000_000, source: 'proportional-fallback' as const },
+    ];
 
-  it('returns empty array when no chapter meets the 500-char threshold', () => {
-    const chapters = [ch(0, ''), ch(1, 'short'), ch(2, '   ')];
-    expect(createInitialAnchors(chapters, 60_000)).toEqual([]);
-  });
-
-  it('maps single chapter to audioMs 0', () => {
-    const chapters = [ch500(0)];
-    const result = createInitialAnchors(chapters, 60_000);
-    expect(result).toHaveLength(1);
-    expect(result[0].audioMs).toBe(0);
-    expect(result[0].chapterIndex).toBe(0);
-  });
-
-  it('assigns equal audioMs slices across multiple chapters', () => {
-    const chapters = [ch500(0), ch500(1), ch500(2)];
-    const result = createInitialAnchors(chapters, 90_000);
-    expect(result).toHaveLength(3);
-    expect(result[0].audioMs).toBe(0);
-    expect(result[1].audioMs).toBe(30_000);
-    expect(result[2].audioMs).toBe(60_000);
-    expect(result.map((a) => a.chapterIndex)).toEqual([0, 1, 2]);
-  });
-
-  it('produces strictly ascending audioMs', () => {
-    const chapters = [ch500(0), ch500(5), ch500(10)];
-    const result = createInitialAnchors(chapters, 100_000);
-    expect(result).toHaveLength(3);
-    expect(result[0].audioMs).toBeLessThan(result[1].audioMs);
-    expect(result[1].audioMs).toBeLessThan(result[2].audioMs);
-  });
-
-  it('skips chapters below 500 chars while keeping equal allocation for the rest', () => {
-    const chapters = [ch(0, 'hi'), ch500(1), ch(2, '   '), ch500(3)];
-    const result = createInitialAnchors(chapters, 60_000);
-    expect(result).toHaveLength(2);
-    expect(result[0].chapterIndex).toBe(1);
-    expect(result[0].audioMs).toBe(0);
-    expect(result[1].chapterIndex).toBe(3);
-    expect(result[1].audioMs).toBe(30_000);
-  });
-
-  it('uses chapterIndex from input, not ordinal position', () => {
-    const chapters = [ch500(7), ch500(3)];
-    const result = createInitialAnchors(chapters, 60_000);
-    expect(result.map((a) => a.chapterIndex)).toEqual([7, 3]);
+    expect(audioMsToChapterPosition(anchors, 1_000_000)).toEqual({ chapterIndex: 5, withinChapterFraction: 0 });
   });
 });
 
-// ─── addConfirmedAnchor ────────────────────────────────────────────────────────
-
-describe('addConfirmedAnchor', () => {
-  const empty: Anchor[] = [];
-  const existing: Anchor[] = [anc(0, 0), anc(30_000, 2), anc(60_000, 4)];
-
-  it('inserts into empty array', () => {
-    const result = addConfirmedAnchor(empty, anc(10_000, 1));
-    expect(result).toHaveLength(1);
-    expect(result[0]).toEqual({ audioMs: 10_000, chapterIndex: 1 });
-  });
-
-  it('does not mutate the input array', () => {
-    const copy = [...existing];
-    addConfirmedAnchor(existing, anc(15_000, 1));
-    expect(existing).toEqual(copy);
-  });
-
-  it('inserts maintaining sort order by audioMs — middle', () => {
-    const result = addConfirmedAnchor(existing, anc(15_000, 1));
-    expect(result).toHaveLength(4);
-    expect(result.map((a) => a.audioMs)).toEqual([0, 15_000, 30_000, 60_000]);
-  });
-
-  it('inserts maintaining sort order — before first', () => {
-    const result = addConfirmedAnchor(
-      [anc(10_000, 1), anc(20_000, 2)],
-      anc(5_000, 0),
-    );
-    expect(result.map((a) => a.audioMs)).toEqual([5_000, 10_000, 20_000]);
-  });
-
-  it('inserts maintaining sort order — after last', () => {
-    const result = addConfirmedAnchor(existing, anc(90_000, 6));
-    expect(result).toHaveLength(4);
-    expect(result[3].audioMs).toBe(90_000);
-  });
-
-  it('replaces anchor at same audioMs', () => {
-    const result = addConfirmedAnchor(existing, anc(30_000, 99));
-    expect(result).toHaveLength(3);
-    const replaced = result.find((a) => a.audioMs === 30_000)!;
-    expect(replaced.chapterIndex).toBe(99);
-  });
-
-  it('deduplicates — inserting an anchor already present is a no-op', () => {
-    const result = addConfirmedAnchor(existing, anc(30_000, 2));
-    expect(result).toHaveLength(3);
-    expect(result).toEqual(existing);
-  });
-});
-
-// ─── interpolateCanonical ──────────────────────────────────────────────────────
-
-describe('interpolateCanonical', () => {
-  const anchors: Anchor[] = [anc(0, 0), anc(30_000, 2), anc(60_000, 4)];
-
-  it('returns null for empty anchors', () => {
-    expect(interpolateCanonical([], 10_000)).toBeNull();
-  });
-
-  it('exact match returns anchor values', () => {
-    expect(interpolateCanonical(anchors, 30_000)).toEqual({
-      chapterIndex: 2,
-      fraction: 0,
+describe('msToFilePosition', () => {
+  it('walks into the second file', () => {
+    expect(msToFilePosition(2_000_000, [1_800_000, 2_400_000])).toEqual({
+      fileIndex: 1,
+      fileSeconds: 200,
     });
   });
 
-  it('first anchor exact match (audioMs 0)', () => {
-    expect(interpolateCanonical(anchors, 0)).toEqual({
-      chapterIndex: 0,
-      fraction: 0,
+  it('clamps negative input to the start', () => {
+    expect(msToFilePosition(-50, [1_800_000, 2_400_000])).toEqual({
+      fileIndex: 0,
+      fileSeconds: 0,
     });
   });
 
-  it('linear interpolation between two anchors — midpoint', () => {
-    // 45_000 ms is halfway between ch2 (30k) and ch4 (60k)
-    // canonical = 2 + 0.5*2 = 3, so chapterIndex=3 fraction=0
-    const result = interpolateCanonical(anchors, 45_000);
-    expect(result).toEqual({ chapterIndex: 3, fraction: 0 });
-  });
-
-  it('linear interpolation — closer to left anchor', () => {
-    // 40_000 ms is 1/3 between ch2 (30k) and ch4 (60k)
-    // canonical = 2 + (1/3)*2 = 2.667, so chapterIndex=2 fraction≈0.667
-    const result = interpolateCanonical(anchors, 40_000);
-    expect(result!.chapterIndex).toBe(2);
-    expect(result!.fraction).toBeCloseTo(2 / 3, 5);
-  });
-
-  it('before first anchor returns first anchor values', () => {
-    const result = interpolateCanonical(anchors, -5_000);
-    expect(result).toEqual({
-      chapterIndex: 0,
-      fraction: 0,
-    });
-  });
-
-  it('past last anchor returns last anchor values', () => {
-    const result = interpolateCanonical(anchors, 999_000);
-    expect(result).toEqual({
-      chapterIndex: 4,
-      fraction: 0,
-    });
-  });
-
-  it('single anchor always returns that anchor', () => {
-    const single = [anc(50_000, 3)];
-    expect(interpolateCanonical(single, 10_000)).toEqual({
-      chapterIndex: 3,
-      fraction: 0,
-    });
-    expect(interpolateCanonical(single, 80_000)).toEqual({
-      chapterIndex: 3,
-      fraction: 0,
+  it('clamps at or beyond the total duration', () => {
+    expect(msToFilePosition(4_500_000, [1_800_000, 2_400_000])).toEqual({
+      fileIndex: 1,
+      fileSeconds: 2_400,
     });
   });
 });
 
-// ─── interpolateAudioMs ────────────────────────────────────────────────────────
-
-describe('interpolateAudioMs', () => {
-  const anchors: Anchor[] = [anc(0, 0), anc(30_000, 2), anc(60_000, 4)];
-
-  it('exact chapter match with fraction 0 returns anchor audioMs', () => {
-    expect(interpolateAudioMs(anchors, 2, 0)).toBe(30_000);
-    expect(interpolateAudioMs(anchors, 0, 0)).toBe(0);
+describe('percentage helpers', () => {
+  it('converts percentage to audioMs', () => {
+    expect(percentageToAudioMs(0.42, 10_000_000)).toBe(4_200_000);
   });
 
-  it('fraction > 0 interpolates between this and next anchor', () => {
-    // canonical = 2 + 0.5 = 2.5, t = (2.5-2)/(4-2) = 0.25
-    // audioMs = 30000 + 0.25*30000 = 37500
-    const result = interpolateAudioMs(anchors, 2, 0.5);
-    expect(result).toBe(37_500);
+  it('converts audioMs to percentage', () => {
+    expect(audioMsToPercentage(2_500_000, 10_000_000)).toBe(0.25);
+  });
+});
+
+describe('refineChapterAnchor', () => {
+  it('replaces a boundary anchor on key collision', () => {
+    const input = [anchor(5, 0, 3_000_000)];
+    const result = refineChapterAnchor(input, { chapterIndex: 5, withinChapterFraction: 0, audioMs: 2_850_000 }, 4_000_000);
+
+    expect(result).not.toBe(input);
+    expect(result).toEqual([
+      { chapterIndex: 5, withinChapterFraction: 0, audioMs: 2_850_000, source: 'confirmed' },
+    ]);
+    expectStrictAscending(result);
   });
 
-  it('fraction 0.25 interpolates correctly', () => {
-    // canonical = 2 + 0.25 = 2.25, t = (2.25-2)/(4-2) = 0.125
-    // audioMs = 30000 + 0.125*30000 = 33750
-    const result = interpolateAudioMs(anchors, 2, 0.25);
-    expect(result).toBe(33_750);
+  it('inserts an interior confirmation', () => {
+    const input = [anchor(5, 0, 3_000_000), anchor(6, 0, 3_600_000)];
+    const result = refineChapterAnchor(input, { chapterIndex: 5, withinChapterFraction: 0.5, audioMs: 3_300_000 }, 4_000_000);
+
+    expect(result).toEqual([
+      { chapterIndex: 5, withinChapterFraction: 0, audioMs: 3_000_000, source: 'proportional-fallback' },
+      { chapterIndex: 5, withinChapterFraction: 0.5, audioMs: 3_300_000, source: 'confirmed' },
+      { chapterIndex: 6, withinChapterFraction: 0, audioMs: 3_600_000, source: 'proportional-fallback' },
+    ]);
+    expectStrictAscending(result);
   });
 
-  it('clamps to first anchor audioMs when canonical is before all anchors', () => {
-    const singleAnchor = [anc(50_000, 5)];
-    expect(interpolateAudioMs(singleAnchor, 3, 0)).toBe(50_000);
+  it('inserts a divider fraction-0 confirmation', () => {
+    const input = [anchor(5, 0, 3_000_000), anchor(7, 0, 4_000_000)];
+    const result = refineChapterAnchor(input, { chapterIndex: 6, withinChapterFraction: 0, audioMs: 3_550_000 }, 5_000_000);
+
+    expect(result).toEqual([
+      { chapterIndex: 5, withinChapterFraction: 0, audioMs: 3_000_000, source: 'proportional-fallback' },
+      { chapterIndex: 6, withinChapterFraction: 0, audioMs: 3_550_000, source: 'confirmed' },
+      { chapterIndex: 7, withinChapterFraction: 0, audioMs: 4_000_000, source: 'proportional-fallback' },
+    ]);
+    expectStrictAscending(result);
   });
 
-  it('past last returns last anchor audioMs', () => {
-    expect(interpolateAudioMs(anchors, 99, 0)).toBe(60_000);
+  it('supersedes a stale interior confirmation', () => {
+    const input = [anchor(5, 0.5, 2_400_000, 'confirmed')];
+    const result = refineChapterAnchor(input, { chapterIndex: 5, withinChapterFraction: 0.3, audioMs: 2_520_000 }, 4_000_000);
+
+    expect(result).toEqual([
+      { chapterIndex: 5, withinChapterFraction: 0.3, audioMs: 2_520_000, source: 'confirmed' },
+    ]);
+    expect(result.filter((a) => a.chapterIndex === 5 && a.withinChapterFraction > 0).length).toBe(1);
+    expectStrictAscending(result);
   });
 
-  it('fraction > 0 for last chapter clamps to last anchor', () => {
-    expect(interpolateAudioMs(anchors, 4, 0.5)).toBe(60_000);
+  it('preserves a non-conflicting interior confirmation when correcting the boundary', () => {
+    const input = [
+      anchor(5, 0, 3_000_000),
+      anchor(5, 0.5, 3_400_000, 'confirmed'),
+    ];
+    const result = refineChapterAnchor(input, { chapterIndex: 5, withinChapterFraction: 0, audioMs: 2_850_000 }, 4_000_000);
+
+    expect(result).toEqual([
+      { chapterIndex: 5, withinChapterFraction: 0, audioMs: 2_850_000, source: 'confirmed' },
+      { chapterIndex: 5, withinChapterFraction: 0.5, audioMs: 3_400_000, source: 'confirmed' },
+    ]);
+    expectStrictAscending(result);
+  });
+
+  it('discards a boundary-vs-interior conflict', () => {
+    const input = [anchor(5, 0.5, 3_000_000, 'confirmed')];
+    const result = refineChapterAnchor(input, { chapterIndex: 5, withinChapterFraction: 0, audioMs: 3_100_000 }, 4_000_000);
+
+    expect(result).toBe(input);
+  });
+
+  it('discards a cross-chapter confirmed conflict', () => {
+    const input = [anchor(6, 0, 3_600_000, 'confirmed')];
+    const result = refineChapterAnchor(input, { chapterIndex: 5, withinChapterFraction: 0, audioMs: 3_700_000 }, 4_000_000);
+
+    expect(result).toBe(input);
+  });
+
+  it('applies a book-start confirmation', () => {
+    const input: ReturnType<typeof refineChapterAnchor> = [];
+    const result = refineChapterAnchor(input, { chapterIndex: 0, withinChapterFraction: 0, audioMs: 0 }, 4_000_000);
+
+    expect(result).toEqual([
+      { chapterIndex: 0, withinChapterFraction: 0, audioMs: 0, source: 'confirmed' },
+    ]);
+    expectStrictAscending(result);
+  });
+
+  it('walks backward and clamps the previous estimate', () => {
+    const input = [anchor(4, 0, 2_100_000), anchor(5, 0, 2_900_000)];
+    const result = refineChapterAnchor(input, { chapterIndex: 5, withinChapterFraction: 0, audioMs: 2_000_000 }, 4_000_000);
+
+    expect(result).toEqual([
+      { chapterIndex: 4, withinChapterFraction: 0, audioMs: 1_999_999, source: 'proportional-fallback' },
+      { chapterIndex: 5, withinChapterFraction: 0, audioMs: 2_000_000, source: 'confirmed' },
+    ]);
+    expectStrictAscending(result);
+  });
+
+  it('continues backward walk after a tie landing', () => {
+    const input = [anchor(3, 0, 1_999_999), anchor(4, 0, 2_900_000)];
+    const result = refineChapterAnchor(input, { chapterIndex: 5, withinChapterFraction: 0, audioMs: 2_000_000 }, 4_000_000);
+
+    expect(result).toEqual([
+      { chapterIndex: 3, withinChapterFraction: 0, audioMs: 1_999_998, source: 'proportional-fallback' },
+      { chapterIndex: 4, withinChapterFraction: 0, audioMs: 1_999_999, source: 'proportional-fallback' },
+      { chapterIndex: 5, withinChapterFraction: 0, audioMs: 2_000_000, source: 'confirmed' },
+    ]);
+    expectStrictAscending(result);
+  });
+
+  it('walks forward from a confirmed entry', () => {
+    const input = [anchor(6, 0, 3_900_000), anchor(7, 0, 3_950_000)];
+    const result = refineChapterAnchor(input, { chapterIndex: 5, withinChapterFraction: 0, audioMs: 4_000_000 }, 4_500_000);
+
+    expect(result).toEqual([
+      { chapterIndex: 5, withinChapterFraction: 0, audioMs: 4_000_000, source: 'confirmed' },
+      { chapterIndex: 6, withinChapterFraction: 0, audioMs: 4_000_001, source: 'proportional-fallback' },
+      { chapterIndex: 7, withinChapterFraction: 0, audioMs: 4_000_002, source: 'proportional-fallback' },
+    ]);
+    expectStrictAscending(result);
+  });
+
+  it('deletes entries that cannot be clamped inside the synthetic bound', () => {
+    const input = [anchor(1, 0, 5), anchor(2, 0, 10)];
+    const result = refineChapterAnchor(input, { chapterIndex: 3, withinChapterFraction: 0, audioMs: 2 }, 100);
+
+    expect(result).toEqual([
+      { chapterIndex: 2, withinChapterFraction: 0, audioMs: 1, source: 'proportional-fallback' },
+      { chapterIndex: 3, withinChapterFraction: 0, audioMs: 2, source: 'confirmed' },
+    ]);
+    expectStrictAscending(result);
   });
 });

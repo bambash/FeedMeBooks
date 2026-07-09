@@ -16,10 +16,9 @@ import AudioPlayer from '../../src/components/AudioPlayer';
 import EbookReader from '../../src/components/EbookReader';
 import { useLibraryStore } from '../../src/store/libraryStore';
 import { colors, radius, spacing, typography } from '../../src/theme';
-import type { EbookPosition, PositionAnchor, PositionMap, ReaderMode, SyncMap } from '../../src/types';
-import { buildSyncPoints, buildSyncPointsFromTranscripts, createInitialAnchors, fillFilePositions, interpolateAudioMs, interpolateCanonical, addConfirmedAnchor, type Anchor, type ChapterText } from '../../src/utils/alignSync';
+import type { AudiobookPositionMap, ChapterPosition, EbookPosition, ReaderMode } from '../../src/types';
+import { audioMsToChapterPosition, audioMsToPercentage, buildChapterAnchors, chapterPositionToAudioMs, deriveBuiltFrom, msToFilePosition, percentageToAudioMs, refineChapterAnchor, type ChapterText } from '../../src/utils/alignSync';
 import { downloadModel, isModelDownloaded, releaseWhisperContext, transcribeFile } from '../../src/utils/transcribeAudio';
-import { deleteSyncMap, loadSyncMap, saveSyncMap } from '../../src/utils/syncMapStorage';
 import { deletePositionMap, loadPositionMap, savePositionMap } from '../../src/utils/positionMapStorage';
 import { deleteTranscriptionCache, loadCachedFileSegments, loadCacheMeta, saveFileSegments } from '../../src/utils/transcriptionCache';
 import { deleteChapterTexts, loadChapterTexts, saveChapterTexts } from '../../src/utils/chapterTextStorage';
@@ -94,8 +93,8 @@ export default function ReaderScreen() {
   const [epubGoPrevRequest, setEpubGoPrevRequest] = useState(0);
   const logsRef = useRef<string[]>([]);
 
-  // Position map (live, progressively refined anchors — replaces legacy SyncMap)
-  const [positionMap, setPositionMap] = useState<PositionMap | null>(null);
+  // Position map (live, progressively refined anchors)
+  const [positionMap, setPositionMap] = useState<AudiobookPositionMap | null>(null);
   const [indexStatus, setIndexStatus] = useState<IndexStatus | null>(null);
   /** Increment to trigger epub text extraction from the WebView */
   const [textExtractRequest, setTextExtractRequest] = useState(0);
@@ -165,28 +164,11 @@ export default function ReaderScreen() {
     return () => { indexCancelledRef.current = true; };
   }, [book?.id]);
 
-  // Load persisted PositionMap and chapter texts when the book changes.
-  // Falls back to legacy SyncMap migration if no PositionMap exists yet.
+  // Load persisted position map and chapter texts when the book changes.
   useEffect(() => {
     if (!book?.id) return;
     (async () => {
-      let map = await loadPositionMap(book.id);
-
-      // Fall back to legacy SyncMap migration
-      if (!map) {
-        const legacy = await loadSyncMap(book.id);
-        if (legacy?.points.length) {
-          map = {
-            bookId: book.id,
-            anchors: legacy.points.map((p) => ({ ...p })),
-            createdAt: legacy.createdAt,
-            totalAudioMs: legacy.totalAudioMs,
-            migratedFromSyncMap: true,
-          };
-          await savePositionMap(map);
-        }
-      }
-
+      const map = await loadPositionMap(book.id);
       if (map) setPositionMap(map);
 
       // Load chapter texts (used by ensurePositionMap and canonical tracking)
@@ -243,14 +225,9 @@ export default function ReaderScreen() {
         if (indexCancelledRef.current) { releaseWhisperContext(); return; }
 
         // Transcribe each audio file, offsetting timestamps to be relative to audiobook start.
-        // We derive per-file durations from the whisper segments themselves (last segment t1Ms)
-        // rather than from audioFileDurations in the store, which may be unpopulated for files
-        // the user hasn't played yet.
         const audioUris = b.audioUris!;
-        const actualFileDurationsMs: number[] = [];
-        const fileTranscripts: string[] = []; // one plain-text string per audio file
+        const transcriptWords: { audioMs: number; text: string }[] = [];
         let cumulativeMs = 0;
-        const allSegments: Awaited<ReturnType<typeof transcribeFile>> = [];
 
         // Check for a previously interrupted transcription run
         const cacheMeta = await loadCacheMeta(b.id, audioUris);
@@ -297,13 +274,9 @@ export default function ReaderScreen() {
           // Fall back to the store-cached duration (seconds → ms) if whisper returned no segments.
           const storedDurationMs = (b.session.audioFileDurations[i] ?? 0) * 1000;
           const fileDurationMs = segs.length > 0 ? segs[segs.length - 1].t1Ms : storedDurationMs;
-          actualFileDurationsMs.push(fileDurationMs);
-          // Collect the full transcript text for this file (used in content-based alignment)
-          fileTranscripts.push(segs.map((s) => s.text).join(' ').trim());
-
-          // Offset segment timestamps so they're relative to the whole audiobook
+          // Offset transcript timestamps so they're relative to the whole audiobook
           for (const s of segs) {
-            allSegments.push({ ...s, t0Ms: s.t0Ms + cumulativeMs, t1Ms: s.t1Ms + cumulativeMs });
+            transcriptWords.push({ audioMs: s.t0Ms + cumulativeMs, text: s.text });
           }
           cumulativeMs += fileDurationMs;
         }
@@ -311,78 +284,29 @@ export default function ReaderScreen() {
         releaseWhisperContext();
         if (indexCancelledRef.current) return;
 
-        handleLog(`[index] aligning ${fileTranscripts.length} audio files to ${chapters.length} chapters by transcript search…`);
+        handleLog(`[index] aligning ${transcriptWords.length} transcript segments to ${chapters.length} chapters…`);
         setIndexStatus({ phase: 'aligning', progress: 0 });
 
-        // Diagnostic: check transcript and chapter text quality before alignment
-        {
-          const tokenize = (t: string) => new Set((t.toLowerCase().match(/\b[a-z']{2,}\b/g) ?? []));
-          const contentChs = chaptersRef.current.filter((c) => c.text.trim().length >= 500);
-          const chWordSets = contentChs.map((c) => ({ label: c.label, words: tokenize(c.text) }));
-
-          // Log summary for every file + best chapter score
-          let emptyCount = 0;
-          for (let fi = 0; fi < fileTranscripts.length; fi++) {
-            const t = fileTranscripts[fi] ?? '';
-            if (!t.trim()) { emptyCount++; continue; }
-            const tWords = tokenize(t);
-            if (tWords.size === 0) { emptyCount++; continue; }
-            let bestScore = 0;
-            let bestLabel = 'none';
-            for (const { label, words } of chWordSets) {
-              let hits = 0;
-              for (const w of tWords) { if (words.has(w)) hits++; }
-              const score = hits / tWords.size;
-              if (score > bestScore) { bestScore = score; bestLabel = label ?? '?'; }
-            }
-            handleLog(
-              `[index] diag file${fi}: len=${t.length} tokens=${tWords.size} sample="${t.slice(0, 60)}" bestChap="${bestLabel}" bestScore=${bestScore.toFixed(3)}`,
-            );
-          }
-          if (emptyCount > 0) handleLog(`[index] warning: ${emptyCount}/${fileTranscripts.length} files produced empty/blank transcripts`);
-        }
-
-        let points = buildSyncPointsFromTranscripts(fileTranscripts, actualFileDurationsMs, chaptersRef.current);
-        const contentChapterCount = chaptersRef.current.filter((c) => c.text.trim().length >= 500).length;
-        const uniqueChapters = new Set(points.map((p) => p.chapterIndex)).size;
-
-        if (points.length === 0 || (uniqueChapters <= 1 && contentChapterCount > 3)) {
-          // Transcript search failed (empty transcripts or all files matched same chapter).
-          // Fall back to proportional text-length mapping.
-          handleLog(`[index] transcript search degenerate (${uniqueChapters} unique chapters), falling back to proportional mapping`);
-          const propPoints = buildSyncPoints(allSegments, chaptersRef.current, cumulativeMs, { equalAllocation: true });
-          points = fillFilePositions(propPoints, actualFileDurationsMs);
-          const uniqueChaptersFallback = new Set(points.map((p) => p.chapterIndex)).size;
-          handleLog(`[index] alignment done (proportional) — ${points.length} sync points spanning ${uniqueChaptersFallback} chapters`);
-        } else {
-          handleLog(`[index] alignment done — ${points.length} sync points spanning ${uniqueChapters} chapters`);
-        }
+        const chapterAnchors = buildChapterAnchors(transcriptWords, chaptersRef.current, cumulativeMs);
 
         if (indexCancelledRef.current) return;
 
-        const map: SyncMap = {
+        const map: AudiobookPositionMap = {
           bookId: b.id,
           createdAt: Date.now(),
           totalAudioMs: cumulativeMs,
-          points,
+          chapterAnchors,
+          builtFrom: deriveBuiltFrom(chapterAnchors),
         };
-        await saveSyncMap(map);
         await deleteTranscriptionCache(b.id);
         await saveChapterTexts(b.id, chapters);
         setPositionMapCreatedAt(b.id, map.createdAt);
 
-        // Promote the Whisper-based SyncMap to a live PositionMap
-        const posMap: PositionMap = {
-          bookId: b.id,
-          anchors: map.points.map((p) => ({ ...p })),
-          createdAt: Date.now(),
-          totalAudioMs: map.totalAudioMs,
-        };
-        await savePositionMap(posMap);
-        setPositionMap(posMap);
+        await savePositionMap(map);
+        setPositionMap(map);
 
         setIndexStatus({ phase: 'done', progress: 1 });
-        handleLog('[index] sync map saved ✓');
+        handleLog(`[index] sync map saved ✓ (${map.chapterAnchors.length} anchors, ${map.builtFrom})`);
       } catch (err) {
         releaseWhisperContext();
         const msg = err instanceof Error ? err.message : String(err);
@@ -398,66 +322,10 @@ export default function ReaderScreen() {
     [setPositionMapCreatedAt, handleLog],
   );
 
-  /** Lazy-init the PositionMap: try to load from storage, fall back to legacy
-   *  SyncMap migration, or create proportional anchors from chapter texts.
-   *  No Whisper needed — proportional anchors are a lightweight bootstrap. */
-  const ensurePositionMap = useCallback(
-    async (totalAudioMs: number): Promise<PositionMap | null> => {
-      const b = bookRef.current;
-      if (!b) return null;
-
-      // Already have a live map for this book?
-      if (positionMap && positionMap.bookId === b.id && positionMap.anchors.length > 0) {
-        return positionMap;
-      }
-
-      // Try loading existing
-      let map = await loadPositionMap(b.id);
-
-      // Fall back to legacy SyncMap migration
-      if (!map) {
-        const legacy = await loadSyncMap(b.id);
-        if (legacy?.points.length) {
-          map = {
-            bookId: b.id,
-            anchors: legacy.points.map((p) => ({ ...p })),
-            createdAt: legacy.createdAt,
-            totalAudioMs: legacy.totalAudioMs,
-            migratedFromSyncMap: true,
-          };
-          await savePositionMap(map);
-        }
-      }
-
-      // Create proportional anchors from chapter texts (no Whisper needed)
-      if (!map) {
-        const chapters = chaptersRef.current;
-        if (chapters.length > 0 && totalAudioMs > 0) {
-          const anchors = createInitialAnchors(chapters, totalAudioMs) as PositionAnchor[];
-          if (anchors.length) {
-            map = { bookId: b.id, anchors, createdAt: Date.now(), totalAudioMs };
-            await savePositionMap(map);
-          }
-        }
-      }
-
-      if (map) {
-        setPositionMap(map);
-        handleLog(
-          map.migratedFromSyncMap
-            ? `[posmap] loaded (migrated from SyncMap, ${map.anchors.length} anchors)`
-            : `[posmap] loaded (${map.anchors.length} anchors)`,
-        );
-      }
-
-      return map;
-    },
-    [positionMap, handleLog],
-  );
-
   /** Start the sync index build: request epub text extraction first */
   const startBuildIndex = useCallback(() => {
-    if (mode !== 'ebook') return; // EpubReader must be mounted
+    const b = bookRef.current;
+    if (mode !== 'ebook' || b?.ebookFormat !== 'epub') return;
     setIndexStatus({ phase: 'extracting', progress: 0 });
     setTextExtractRequest((n) => n + 1);
   }, [mode]);
@@ -466,7 +334,6 @@ export default function ReaderScreen() {
     const b = bookRef.current;
     if (!b) return;
     await Promise.all([
-      deleteSyncMap(b.id),
       deletePositionMap(b.id),
       deleteTranscriptionCache(b.id),
       deleteChapterTexts(b.id),
@@ -476,117 +343,64 @@ export default function ReaderScreen() {
     setIndexStatus(null);
   }, [setPositionMapCreatedAt]);
 
-  /** Derive fileIndex and fileSeconds from a global audioMs value
-   *  using the actual (session) file durations. */
-  const audioMsToFilePosition = useCallback(
-    (b: NonNullable<ReturnType<typeof getBook>>, audioMs: number) => {
-      const durations = b.session.audioFileDurations ?? [];
-      let targetFileIndex = durations.length - 1;
-      let targetSeconds = durations[durations.length - 1] ?? 0;
-      let cum = 0;
-      for (let i = 0; i < durations.length; i++) {
-        const d = (durations[i] ?? 0) * 1000;
-        if (cum + d > audioMs) {
-          targetFileIndex = i;
-          targetSeconds = (audioMs - cum) / 1000;
-          break;
-        }
-        cum += d;
-      }
-      return { targetFileIndex, targetSeconds };
-    },
-    [],
-  );
-
   const switchMode = useCallback(
     (next: ReaderMode) => {
       if (next === mode) return;
 
       const b = bookRef.current;
       if (b) {
-        const durations = b.session.audioFileDurations ?? [];
-        const totalDuration = durations.reduce((s, d) => s + (d ?? 0), 0);
+        const durationsMs = (b.session.audioFileDurations ?? []).map((duration) => (duration ?? 0) * 1000);
+        const totalAudioMs = durationsMs.reduce((sum, durationMs) => sum + durationMs, 0);
+        const syncStrategy = b.ebookFormat === 'epub' ? 'chapter' : 'percentage';
 
-        // Lazy-init PositionMap if needed
-        const totalAudioMs = totalDuration * 1000;
+        if (mode === 'audio' && next === 'ebook' && totalAudioMs > 0) {
+          const elapsedMs =
+            durationsMs.slice(0, b.session.audioFileIndex).reduce((sum, durationMs) => sum + durationMs, 0) +
+            b.session.audioPosition * 1000;
+          pendingSwitchAudioMsRef.current = elapsedMs;
 
-        if (mode === 'audio' && next === 'ebook' && totalDuration > 0) {
-          const elapsed =
-            durations.slice(0, b.session.audioFileIndex).reduce((s, d) => s + (d ?? 0), 0) +
-            b.session.audioPosition;
-          const pct = Math.min(elapsed / totalDuration, 1);
-          const currentAudioMs = elapsed * 1000;
-          pendingSwitchAudioMsRef.current = currentAudioMs;
-
-          // Use canonical position from handleAudioPositionChange if available,
-          // otherwise fall back to PositionMap interpolation
-          const canonicalCh = canonicalChapterIndexRef.current;
-          if (canonicalCh >= 0 && positionMap?.anchors.length) {
-            const chLabel = chaptersRef.current.find((c) => c.chapterIndex === canonicalCh)?.label;
-            setSyncBanner({ targetMode: 'ebook', percentage: pct, targetChapterIndex: canonicalCh, targetChapterLabel: chLabel });
-            handleLog(
-              `[sync] audio→ebook: audioMs=${currentAudioMs} canonical=ch${canonicalCh}` +
-              ` frac=${canonicalWithinChapterFractionRef.current.toFixed(3)}`,
-            );
-          } else if (positionMap?.anchors.length) {
-            const canonical = interpolateCanonical(positionMap.anchors as Anchor[], currentAudioMs);
-            if (canonical) {
-              const chLabel = chaptersRef.current.find((c) => c.chapterIndex === canonical.chapterIndex)?.label;
-              setSyncBanner({ targetMode: 'ebook', percentage: pct, targetChapterIndex: canonical.chapterIndex, targetChapterLabel: chLabel });
-            }
-          } else if (pct > 0.01) {
-            setSyncBanner({ targetMode: 'ebook', percentage: pct });
+          if (syncStrategy === 'chapter' && positionMap?.chapterAnchors.length) {
+            const chapterPosition = audioMsToChapterPosition(positionMap.chapterAnchors, elapsedMs);
+            const chLabel = chaptersRef.current.find((c) => c.chapterIndex === chapterPosition.chapterIndex)?.label;
+            setSyncBanner({
+              targetMode: 'ebook',
+              percentage: audioMsToPercentage(elapsedMs, totalAudioMs),
+              targetChapterIndex: chapterPosition.chapterIndex,
+              targetChapterLabel: chLabel,
+            });
+            handleLog(`[sync] audio→ebook: audioMs=${elapsedMs} → ch${chapterPosition.chapterIndex}`);
+          } else {
+            const pct = audioMsToPercentage(elapsedMs, totalAudioMs);
+            if (pct > 0.01) setSyncBanner({ targetMode: 'ebook', percentage: pct });
           }
-        } else if (mode === 'ebook' && next === 'audio' && totalDuration > 0) {
+        } else if (mode === 'ebook' && next === 'audio' && totalAudioMs > 0) {
           const pct = b.session.ebookPosition.percentage;
           const spineIndex = b.session.ebookPosition.spineIndex ?? -1;
-
           if (spineIndex >= 0 || pct > 0.01) {
-            const canonicalCh = canonicalChapterIndexRef.current;
-            const canonicalFrac = canonicalWithinChapterFractionRef.current;
-
-            // Use canonical position + PositionMap to compute audio target
-            if (positionMap?.anchors.length && canonicalCh >= 0) {
-              const targetMs = interpolateAudioMs(positionMap.anchors as Anchor[], canonicalCh, canonicalFrac);
-              if (targetMs != null) {
-                const { targetFileIndex, targetSeconds } = audioMsToFilePosition(b, targetMs);
-                pendingSwitchAudioMsRef.current = targetMs;
-                handleLog(
-                  `[sync] ebook→audio: canonical=ch${canonicalCh}` +
-                  ` frac=${canonicalFrac.toFixed(3)} audioMs=${targetMs}` +
-                  ` → fileIdx=${targetFileIndex} fileSeconds=${targetSeconds.toFixed(1)}`,
-                );
-                setSyncBanner({ targetMode: 'audio', percentage: pct, targetFileIndex, targetSeconds });
-              }
+            if (syncStrategy === 'chapter' && positionMap?.chapterAnchors.length) {
+              const chapterPosition: ChapterPosition = {
+                chapterIndex: canonicalChapterIndexRef.current >= 0 ? canonicalChapterIndexRef.current : spineIndex,
+                withinChapterFraction: canonicalWithinChapterFractionRef.current,
+              };
+              const targetMs = chapterPositionToAudioMs(positionMap.chapterAnchors, chapterPosition);
+              const { fileIndex, fileSeconds } = msToFilePosition(targetMs, durationsMs);
+              pendingSwitchAudioMsRef.current = targetMs;
+              setSyncBanner({ targetMode: 'audio', percentage: pct, targetFileIndex: fileIndex, targetSeconds: fileSeconds });
+              handleLog(
+                `[sync] ebook→audio: ch${chapterPosition.chapterIndex} frac=${chapterPosition.withinChapterFraction.toFixed(3)}` +
+                ` audioMs=${targetMs} → fileIdx=${fileIndex} fileSeconds=${fileSeconds.toFixed(1)}`,
+              );
             } else {
-              // Fallback: percentage × total duration
-              handleLog(`[sync] ebook→audio: no PositionMap, using pct=${pct.toFixed(3)}`);
-              const targetElapsed = pct * totalDuration;
-              let cumulative = 0;
-              let targetFileIndex = durations.length - 1;
-              let targetSeconds = durations[durations.length - 1] ?? 0;
-              for (let i = 0; i < durations.length; i++) {
-                const d = durations[i] ?? 0;
-                if (cumulative + d >= targetElapsed) {
-                  targetFileIndex = i;
-                  targetSeconds = targetElapsed - cumulative;
-                  break;
-                }
-                cumulative += d;
-              }
-              setSyncBanner({ targetMode: 'audio', percentage: pct, targetFileIndex, targetSeconds });
+              const targetMs = percentageToAudioMs(pct, totalAudioMs);
+              const { fileIndex, fileSeconds } = msToFilePosition(targetMs, durationsMs);
+              pendingSwitchAudioMsRef.current = targetMs;
+              setSyncBanner({ targetMode: 'audio', percentage: pct, targetFileIndex: fileIndex, targetSeconds: fileSeconds });
+              handleLog(`[sync] ebook→audio: pct=${pct.toFixed(3)} audioMs=${targetMs}`);
             }
           }
-        }
-
-        // Fire-and-forget: ensure PositionMap exists for future switches
-        if (totalAudioMs > 0 && !positionMap?.anchors.length) {
-          ensurePositionMap(totalAudioMs);
         }
       }
 
-      // Clear epub jump targets when leaving ebook — prevents stale values
-      // from re-triggering when EbookReader remounts on next visit
       if (mode === 'ebook') {
         setEpubTargetPercentage(null);
         setEpubTargetChapter(null);
@@ -599,28 +413,34 @@ export default function ReaderScreen() {
       ]).start();
       setMode(next);
     },
-    [mode, fadeAnim, positionMap, ensurePositionMap, audioMsToFilePosition, handleLog],
+    [mode, fadeAnim, positionMap, handleLog],
   );
 
-  const handleSyncAccept = useCallback(() => {
+  const handleSyncAccept = useCallback(async () => {
     const b = bookRef.current;
     if (!syncBanner || !b) return;
 
-    // Add confirmed anchor for progressive refinement
     const map = positionMap;
     const audioMs = pendingSwitchAudioMsRef.current;
     const canonicalCh = canonicalChapterIndexRef.current;
     const canonicalFrac = canonicalWithinChapterFractionRef.current;
 
-    if (map && audioMs > 0 && canonicalCh >= 0) {
-      const newAnchors = addConfirmedAnchor(map.anchors as Anchor[], { audioMs, chapterIndex: canonicalCh });
-      const updated: PositionMap = { ...map, anchors: newAnchors as PositionAnchor[] };
-      setPositionMap(updated);
-      savePositionMap(updated);
-      handleLog(
-        `[posmap] confirmed anchor: audioMs=${audioMs} ch=${canonicalCh}` +
-        ` frac=${canonicalFrac.toFixed(3)} (${newAnchors.length} anchors total)`,
+    if (map && canonicalCh >= 0) {
+      const totalAudioMs = (b.session.audioFileDurations ?? []).reduce((sum, duration) => sum + (duration ?? 0), 0) * 1000;
+      const refined = refineChapterAnchor(
+        map.chapterAnchors,
+        { chapterIndex: canonicalCh, withinChapterFraction: canonicalFrac, audioMs },
+        totalAudioMs,
       );
+      if (refined !== map.chapterAnchors) {
+        const updated: AudiobookPositionMap = { ...map, chapterAnchors: refined, builtFrom: deriveBuiltFrom(refined) };
+        setPositionMap(updated);
+        await savePositionMap(updated);
+        handleLog(
+          `[posmap] confirmed anchor: audioMs=${audioMs} ch=${canonicalCh}` +
+          ` frac=${canonicalFrac.toFixed(3)} (${refined.length} anchors total)`,
+        );
+      }
     }
 
     // Apply the jump
@@ -666,20 +486,15 @@ export default function ReaderScreen() {
       if (!book) return;
       updateAudioPosition(book.id, fileIndex, seconds);
 
-      // Derive canonical via PositionMap interpolation
-      const durations = book.session.audioFileDurations ?? [];
-      const elapsed =
-        durations.slice(0, fileIndex).reduce((s, d) => s + (d ?? 0), 0) + seconds;
-      const audioMs = elapsed * 1000;
+      const durationsMs = (book.session.audioFileDurations ?? []).map((duration) => (duration ?? 0) * 1000);
+      const audioMs = durationsMs.slice(0, fileIndex).reduce((sum, durationMs) => sum + durationMs, 0) + seconds * 1000;
       pendingSwitchAudioMsRef.current = audioMs;
 
       const map = positionMap;
-      if (map?.anchors.length) {
-        const canonical = interpolateCanonical(map.anchors as Anchor[], audioMs);
-        if (canonical) {
-          canonicalChapterIndexRef.current = canonical.chapterIndex;
-          canonicalWithinChapterFractionRef.current = canonical.fraction;
-        }
+      if (map?.chapterAnchors.length) {
+        const canonical = audioMsToChapterPosition(map.chapterAnchors, audioMs);
+        canonicalChapterIndexRef.current = canonical.chapterIndex;
+        canonicalWithinChapterFractionRef.current = canonical.withinChapterFraction;
       }
     },
     [book, updateAudioPosition, positionMap],
@@ -741,7 +556,7 @@ export default function ReaderScreen() {
           onToggleDev={() => setDevMode((v) => !v)}
           onCopyLogs={copyLogs}
           onViewLogs={() => setShowLogViewer(true)}
-          canBuildIndex={canEbook && canAudio && mode === 'ebook'}
+          canBuildIndex={canEbook && canAudio && mode === 'ebook' && book.ebookFormat === 'epub'}
           syncMapCreatedAt={book.session.positionMapCreatedAt}
           indexStatus={indexStatus}
           onBuildIndex={startBuildIndex}

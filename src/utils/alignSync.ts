@@ -1,424 +1,322 @@
 /**
- * Audio↔ebook alignment.
- *
- * Takes word-level Whisper transcript segments and epub chapter texts,
- * produces a PositionMap: a sorted list of (audioMs → chapterIndex) anchors.
- *
- * Algorithm: proportional text-length mapping.
- * Each non-empty chapter is assumed to occupy an audio time range
- * proportional to its share of total book text length. This is narrator-
- * rate-agnostic and works without complex vocabulary matching.
- *
- * A Jaccard sliding window approach was tried first but failed in practice
- * because: (a) chapter vocabulary sets are far larger than 30-second windows
- * (Jaccard penalises large sets heavily), and (b) shared proper nouns across
- * chapters make relative scores indistinguishable.
+ * Chapter alignment and position conversion.
  */
 
-import type { PositionAnchor, SyncPoint } from '../types';
-import type { TranscribeSegment } from './transcribeAudio';
-
-// ─── Types ───────────────────────────────────────────────────────────────────
+import type { AudiobookPositionMap, ChapterAnchor, ChapterPosition } from '../types';
 
 export interface ChapterText {
   chapterIndex: number;
-  /** Full plain text of the chapter (whitespace-normalised) */
+  /** Full plain text of the chapter (whitespace-normalized) */
   text: string;
-  /** TOC label (chapter title) — used for logging and back-matter detection */
+  /** TOC label (chapter title) - used for logging and back-matter detection */
   label?: string;
 }
 
-/** A confirmed alignment point between audio time and book position */
-export interface Anchor {
-  /** Milliseconds from the start of the whole audiobook */
-  audioMs: number;
-  /** epub.js spine chapter index (0-based) */
-  chapterIndex: number;
-}
+export const BOUNDARY_PROBE_WORDS = 12;
+export const SEARCH_WINDOW_FRACTION = 0.15;
+export const SEARCH_WINDOW_MIN_MS = 90_000;
+export const MATCH_THRESHOLD = 0.6;
+export const CONTENT_CHAPTER_MIN_CHARS = 500;
+export const CANONICAL_EPSILON = 1e-9;
 
-// ─── Core alignment ──────────────────────────────────────────────────────────
+const tokenizeWords = (text: string): string[] => text.toLowerCase().match(/\b[a-z']{2,}\b/g) ?? [];
 
-/**
- * Build a list of sync points from chapter texts and total audio duration.
- *
- * Each non-empty chapter gets one sync point whose audioMs is derived by
- * dividing the timeline either proportionally by chapter text length (default)
- * or equally per chapter (opts.equalAllocation = true).
- *
- * Equal allocation is more accurate when the audiobook uses a constant
- * narration rate regardless of chapter length (which is the common case).
- * Text-length allocation is only better when chapter lengths vary by 10×+
- * and narration rate is known to track text length.
- *
- * @param segments  Word-level segments (used only to derive totalMs if caller
- *                  passes 0; otherwise unused in the proportional algorithm)
- * @param chapters  Epub chapter texts (chapterIndex = spine index, 0-based)
- * @param totalMs   Total audiobook duration in ms
- * @param opts      { equalAllocation?: boolean }
- */
-export function buildSyncPoints(
-  segments: TranscribeSegment[],
-  chapters: ChapterText[],
-  totalMs: number,
-  opts?: { equalAllocation?: boolean },
-): PositionAnchor[] {
-  // Fall back to segment-derived duration if caller could not supply totalMs
-  const effectiveTotalMs =
-    totalMs > 0
-      ? totalMs
-      : segments.length > 0
-        ? Math.max(...segments.map((s) => s.t1Ms))
-        : 0;
+const canonicalKey = (anchor: Pick<ChapterAnchor, 'chapterIndex' | 'withinChapterFraction'>): number =>
+  anchor.chapterIndex + anchor.withinChapterFraction;
 
-  if (!effectiveTotalMs || !chapters.length) return [];
-
-  // Only chapters with substantial text contribute to the timeline.
-  // Threshold of 500 chars filters out part-header pages, copyright pages,
-  // and other spine items that are just titles/headings with no real content.
-  const contentChapters = chapters.filter((c) => c.text.trim().length >= 500);
-  if (!contentChapters.length) return [];
-
-  const n = contentChapters.length;
-  const useEqual = opts?.equalAllocation ?? false;
-  const totalChars = useEqual ? 0 : contentChapters.reduce((sum, c) => sum + c.text.length, 0);
-  if (!useEqual && !totalChars) return [];
-
-  const points: PositionAnchor[] = [];
-  let cumChars = 0;
-
-  for (let i = 0; i < n; i++) {
-    const chapter = contentChapters[i];
-    const audioMs = useEqual
-      ? Math.round((i / n) * effectiveTotalMs)
-      : Math.round((cumChars / totalChars) * effectiveTotalMs);
-    points.push({
-      audioMs,
-      fileIndex: 0,          // filled in by fillFilePositions()
-      fileSeconds: 0,
-      chapterIndex: chapter.chapterIndex,
-      withinChapterFraction: 0,
-      source: 'proportional' as const,
-    });
-    if (!useEqual) cumChars += chapter.text.length;
-  }
-
-  return points;
-}
-
-// ─── Transcript-based alignment ──────────────────────────────────────────────
-
-const tokenizeWords = (t: string): string[] => t.toLowerCase().match(/\b[a-z']{2,}\b/g) ?? [];
-
-/**
- * Build a sync map by matching each audio file's full transcript against epub
- * chapters.  This is far more accurate than proportional mapping because it
- * uses actual content overlap rather than assuming narrator speed is constant.
- *
- * Algorithm:
- *  - Pre-build a word-set for every chapter (O(Σ chapter text))
- *  - For each audio file, use audio position to estimate which chapter ordinal
- *    we should be near (proportional bounding), then score every chapter within
- *    ±30% (min ±3) of that estimate using vocab recall
- *  - Assign the highest-scoring chapter; enforce monotonic ordering so the
- *    chapter index can never go backward
- *  - If no chapter exceeds the recall threshold, keep the last assignment
- *
- * The proportional bound prevents early/common chapters from "winning" for
- * files deep into the audiobook, while vocabulary matching provides precision
- * within that window.
- *
- * Returns one SyncPoint per audio file (at the file's start position).
- */
-export function buildSyncPointsFromTranscripts(
-  fileTranscripts: string[],
-  fileDurationsMs: number[],
-  chapters: ChapterText[],
-): PositionAnchor[] {
-  const contentChapters = chapters.filter((c) => c.text.trim().length >= 500);
-  if (!contentChapters.length || !fileTranscripts.length) return [];
-
-  // Pre-build word sets for each chapter — reused for every file lookup
-  const chapterWordSets = contentChapters.map((c) => new Set(tokenizeWords(c.text)));
-
-  const n = contentChapters.length;
-  const totalAudioMs = fileDurationsMs.reduce((s, d) => s + (d ?? 0), 0);
-  // Half-window: ±30% of chapter count, but never less than 3 either side
-  const halfWindow = Math.max(3, Math.ceil(n * 0.3));
-
-  const points: PositionAnchor[] = [];
-  let cumulativeMs = 0;
-  let lastOrdinal = 0; // ordinal position in contentChapters array (monotonic)
-
-  for (let fileIdx = 0; fileIdx < fileTranscripts.length; fileIdx++) {
-    const transcript = fileTranscripts[fileIdx];
-    const durationMs = fileDurationsMs[fileIdx] ?? 0;
-
-    if (transcript.trim().length > 0) {
-      const transcriptWords = new Set(tokenizeWords(transcript));
-
-      if (transcriptWords.size > 0) {
-        // Proportional estimate of where we should be in the chapter list
-        const audioPct = totalAudioMs > 0 ? cumulativeMs / totalAudioMs : 0;
-        const expectedOrdinal = Math.round(audioPct * n);
-
-        // Search range: at/after lastOrdinal AND within ±halfWindow of expected
-        const searchLo = Math.max(lastOrdinal, Math.max(0, expectedOrdinal - halfWindow));
-        const searchHi = Math.min(n - 1, expectedOrdinal + halfWindow);
-
-        let bestOrdinal = lastOrdinal;
-        let bestScore = -1;
-
-        for (let ci = searchLo; ci <= searchHi; ci++) {
-          const chWords = chapterWordSets[ci];
-          let hits = 0;
-          for (const w of transcriptWords) {
-            if (chWords.has(w)) hits++;
-          }
-          const score = hits / transcriptWords.size;
-          if (score > bestScore) {
-            bestScore = score;
-            bestOrdinal = ci;
-          }
-        }
-
-        // Threshold kept low (0.05) because audio files span multiple chapters
-        // and common vocabulary alone can push recall past 0.2 for the right chapter.
-        if (bestScore >= 0.05) {
-          lastOrdinal = bestOrdinal;
-        }
-      }
-    }
-
-    points.push({
-      audioMs: cumulativeMs,
-      fileIndex: fileIdx,
-      fileSeconds: 0,
-      chapterIndex: contentChapters[lastOrdinal].chapterIndex,
-      withinChapterFraction: 0,
-      source: 'transcript' as const,
-    });
-
-    cumulativeMs += durationMs;
-  }
-
-  return points;
-}
-
-/**
- * Populate fileIndex and fileSeconds on each SyncPoint from cumulative durations.
- * @param fileDurationsMs  Duration (ms) of each audio file in order
- */
-export function fillFilePositions(
-  points: PositionAnchor[],
-  fileDurationsMs: number[],
-): PositionAnchor[] {
-  return points.map((pt) => {
-    let cum = 0;
-    for (let i = 0; i < fileDurationsMs.length; i++) {
-      const d = fileDurationsMs[i] ?? 0;
-      if (cum + d > pt.audioMs) {
-        return { ...pt, fileIndex: i, fileSeconds: (pt.audioMs - cum) / 1000 };
-      }
-      cum += d;
-    }
-    // Clamp to last file
-    const last = fileDurationsMs.length - 1;
-    return { ...pt, fileIndex: Math.max(0, last), fileSeconds: (fileDurationsMs[last] ?? 0) / 1000 };
-  });
-}
-
-// ─── Lookup helpers ──────────────────────────────────────────────────────────
-
-/**
- * Return the SyncPoint whose audioMs is ≤ the given time (binary search).
- * Returns null if points is empty.
- */
-export function lookupByAudio(points: PositionAnchor[], audioMs: number): PositionAnchor | null {
-  if (!points.length) return null;
-  let lo = 0;
-  let hi = points.length - 1;
-  while (lo < hi) {
-    const mid = (lo + hi + 1) >> 1;
-    if (points[mid].audioMs <= audioMs) lo = mid;
-    else hi = mid - 1;
-  }
-  return points[lo];
-}
-
-/**
- * Return the first SyncPoint whose chapterIndex >= the given index.
- * Useful for ebook→audio sync.
- */
-export function lookupByChapter(points: PositionAnchor[], chapterIndex: number): PositionAnchor | null {
-  return points.find((p) => p.chapterIndex >= chapterIndex) ?? points[points.length - 1] ?? null;
-}
-
-/**
- * Find the chapter index that best matches a short transcribed audio window.
- *
- * Scoring: recall = fraction of unique window words found anywhere in the
- * chapter text.  Returns null if no chapter scores ≥ 0.25.
- *
- * @param windowText   Transcribed text from a 10–15 second audio window
- * @param chapters     Chapter texts as stored by chapterTextStorage
- */
-export function findChapterByWindowText(
-  windowText: string,
-  chapters: { chapterIndex: number; text: string }[],
-): number | null {
-  const tokenize = (t: string): string[] => t.toLowerCase().match(/\b[a-z']{2,}\b/g) ?? [];
-
-  const windowTokens = tokenize(windowText);
-  if (!windowTokens.length || !chapters.length) return null;
-
-  const windowSet = new Set(windowTokens);
-  let bestChapter: number | null = null;
-  let bestScore = 0;
-
-  for (const ch of chapters) {
-    const lower = ch.text.toLowerCase();
-    let hits = 0;
-    for (const w of windowSet) {
-      if (lower.includes(w)) hits++;
-    }
-    const score = hits / windowSet.size;
-    if (score > bestScore) {
-      bestScore = score;
-      bestChapter = ch.chapterIndex;
-    }
-  }
-
-  return bestScore >= 0.25 ? bestChapter : null;
-}
-
-// ─── Position-map utilities ──────────────────────────────────────────────────
-
-/**
- * Create proportional anchors with equal chapter allocation.
- *
- * Each content chapter (text.length >= 500) gets one anchor placed at a point
- * proportional to its index in the chapter list. This assumes chapters are
- * roughly equal in narrated duration.
- */
-export function createInitialAnchors(
+export function buildChapterAnchors(
+  transcriptWords: { audioMs: number; text: string }[],
   chapters: ChapterText[],
   totalAudioMs: number,
-): Anchor[] {
+): ChapterAnchor[] {
   if (!totalAudioMs || !chapters.length) return [];
 
-  const contentChapters = chapters.filter((c) => c.text.trim().length >= 500);
+  const contentChapters = chapters.filter((chapter) => chapter.text.trim().length >= CONTENT_CHAPTER_MIN_CHARS);
   if (!contentChapters.length) return [];
 
-  const n = contentChapters.length;
-  return contentChapters.map((ch, i) => ({
-    audioMs: Math.round((i / n) * totalAudioMs),
-    chapterIndex: ch.chapterIndex,
-  }));
-}
+  const totalChars = contentChapters.reduce((sum, chapter) => sum + chapter.text.length, 0);
+  if (!totalChars) return [];
 
-/**
- * Insert a confirmed anchor into a sorted list, replacing any existing anchor
- * at the same audioMs. The returned array is sorted ascending by audioMs.
- */
-export function addConfirmedAnchor(anchors: Anchor[], newAnchor: Anchor): Anchor[] {
-  const idx = anchors.findIndex((a) => a.audioMs === newAnchor.audioMs);
+  const transcriptTokens = transcriptWords.map((word) => tokenizeWords(word.text)[0] ?? '');
+  const anchors: ChapterAnchor[] = [];
+  let cumCharsBefore = 0;
 
-  if (idx !== -1) {
-    const next = [...anchors];
-    next[idx] = newAnchor;
-    return next.sort((a, b) => a.audioMs - b.audioMs);
+  for (const chapter of contentChapters) {
+    const probeWords = tokenizeWords(chapter.text).slice(0, BOUNDARY_PROBE_WORDS);
+    const probeSet = new Set(probeWords);
+    const expectedMs = (cumCharsBefore / totalChars) * totalAudioMs;
+    const searchWindowMs = Math.max(SEARCH_WINDOW_FRACTION * totalAudioMs, SEARCH_WINDOW_MIN_MS);
+    const windowStart = anchors.length === 0 ? 0 : Math.max(0, expectedMs - searchWindowMs);
+    const windowEnd = expectedMs + searchWindowMs;
+
+    let bestIndex = -1;
+    let bestScore = -1;
+
+    for (let i = 0; i < transcriptWords.length; i++) {
+      const audioMs = transcriptWords[i]?.audioMs ?? 0;
+      if (audioMs < windowStart || audioMs > windowEnd) continue;
+
+      const candidateWords = transcriptTokens.slice(i, i + BOUNDARY_PROBE_WORDS).filter(Boolean);
+      const candidateSet = new Set(candidateWords);
+      let hits = 0;
+      for (const token of probeSet) {
+        if (candidateSet.has(token)) hits++;
+      }
+
+      const score = hits / BOUNDARY_PROBE_WORDS;
+      if (score > bestScore) {
+        bestScore = score;
+        bestIndex = i;
+      }
+    }
+
+    let source: ChapterAnchor['source'] = 'proportional-fallback';
+    let confidence: number | undefined;
+    let resolvedMs = expectedMs;
+
+    if (bestIndex >= 0 && bestScore >= MATCH_THRESHOLD) {
+      resolvedMs = transcriptWords[bestIndex].audioMs;
+      source = 'forced-alignment';
+      confidence = bestScore;
+    }
+
+    const previous = anchors[anchors.length - 1];
+    if (previous && resolvedMs <= previous.audioMs) {
+      resolvedMs = Math.max(expectedMs, previous.audioMs + 1);
+      source = 'proportional-fallback';
+      confidence = undefined;
+    }
+
+    const anchor: ChapterAnchor = {
+      chapterIndex: chapter.chapterIndex,
+      withinChapterFraction: 0,
+      audioMs: resolvedMs,
+      source,
+    };
+    if (confidence != null) anchor.confidence = confidence;
+    anchors.push(anchor);
+    cumCharsBefore += chapter.text.length;
   }
 
-  return [...anchors, newAnchor].sort((a, b) => a.audioMs - b.audioMs);
+  return anchors;
 }
 
-/**
- * Given an audio time (ms), use binary search + linear interpolation over the
- * anchor list to estimate the corresponding canonical book position.
- *
- * Returns { chapterIndex, fraction } or null if anchors is empty.
- */
-export function interpolateCanonical(
-  anchors: Anchor[],
-  audioMs: number,
-): { chapterIndex: number; fraction: number } | null {
-  if (!anchors.length) return null;
+export function deriveBuiltFrom(anchors: ChapterAnchor[]): AudiobookPositionMap['builtFrom'] {
+  return anchors.some((anchor) => anchor.source === 'forced-alignment') ? 'transcript' : 'unavailable';
+}
 
-  // Binary search for the rightmost anchor with audioMs <= query
+export function chapterPositionToAudioMs(anchors: ChapterAnchor[], pos: ChapterPosition): number {
+  if (!anchors.length) return 0;
+  if (anchors.length === 1) return anchors[0].audioMs;
+
+  const targetKey = canonicalKey(pos);
+  const firstKey = canonicalKey(anchors[0]);
+  const lastIndex = anchors.length - 1;
+  const lastKey = canonicalKey(anchors[lastIndex]);
+
+  if (targetKey <= firstKey) return anchors[0].audioMs;
+  if (targetKey >= lastKey) return anchors[lastIndex].audioMs;
+
   let lo = 0;
-  let hi = anchors.length - 1;
+  let hi = lastIndex;
   while (lo < hi) {
     const mid = (lo + hi + 1) >> 1;
-    if (anchors[mid].audioMs <= audioMs) lo = mid;
+    if (canonicalKey(anchors[mid]) <= targetKey) lo = mid;
     else hi = mid - 1;
   }
 
   const left = anchors[lo];
-
-  // Beyond the last anchor — return it with fraction 0
-  if (lo >= anchors.length - 1) {
-    return { chapterIndex: left.chapterIndex, fraction: 0 };
-  }
-
-  // Before the first anchor — return it with fraction 0
-  if (audioMs < anchors[0].audioMs) {
-    return { chapterIndex: anchors[0].chapterIndex, fraction: 0 };
-  }
-
   const right = anchors[lo + 1];
-  const range = right.audioMs - left.audioMs;
-  if (range === 0) {
-    return { chapterIndex: left.chapterIndex, fraction: 0 };
+  const leftKey = canonicalKey(left);
+  const rightKey = canonicalKey(right);
+  const keySpan = rightKey - leftKey;
+  const audioSpan = right.audioMs - left.audioMs;
+
+  if (Math.abs(keySpan) <= CANONICAL_EPSILON || Math.abs(audioSpan) <= CANONICAL_EPSILON) return left.audioMs;
+
+  const t = (targetKey - leftKey) / keySpan;
+  return left.audioMs + t * audioSpan;
+}
+
+export function audioMsToChapterPosition(anchors: ChapterAnchor[], audioMs: number): ChapterPosition {
+  if (!anchors.length) return { chapterIndex: 0, withinChapterFraction: 0 };
+  if (anchors.length === 1) return { chapterIndex: anchors[0].chapterIndex, withinChapterFraction: 0 };
+
+  const first = anchors[0];
+  const lastIndex = anchors.length - 1;
+  const last = anchors[lastIndex];
+
+  if (audioMs <= first.audioMs) {
+    return { chapterIndex: first.chapterIndex, withinChapterFraction: 0 };
+  }
+  if (audioMs > last.audioMs) {
+    return { chapterIndex: last.chapterIndex, withinChapterFraction: 1 };
   }
 
-  const t = Math.max(0, Math.min(1, (audioMs - left.audioMs) / range));
-  const canonical = left.chapterIndex + t * (right.chapterIndex - left.chapterIndex);
+  let lo = 0;
+  let hi = lastIndex;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (anchors[mid].audioMs < audioMs) lo = mid + 1;
+    else hi = mid;
+  }
+
+  const rightIndex = lo;
+  const right = anchors[rightIndex];
+  if (Math.abs(right.audioMs - audioMs) <= CANONICAL_EPSILON) {
+    return { chapterIndex: right.chapterIndex, withinChapterFraction: 0 };
+  }
+
+  const left = anchors[rightIndex - 1];
+  if (Math.abs(right.audioMs - left.audioMs) <= CANONICAL_EPSILON) {
+    return { chapterIndex: left.chapterIndex, withinChapterFraction: 0 };
+  }
+
+  const t = (audioMs - left.audioMs) / (right.audioMs - left.audioMs);
+  const canonical = canonicalKey(left) + t * (canonicalKey(right) - canonicalKey(left));
   const chapterIndex = Math.floor(canonical);
-  const fraction = canonical - chapterIndex;
-
-  return { chapterIndex, fraction };
+  return { chapterIndex, withinChapterFraction: canonical - chapterIndex };
 }
 
-/**
- * Reverse of interpolateCanonical: given a canonical book position
- * (chapterIndex + fraction), estimate the corresponding audio time (ms).
- *
- * Returns the estimated audioMs or null if anchors is empty.
- */
-export function interpolateAudioMs(
-  anchors: Anchor[],
-  chapterIndex: number,
-  fraction: number,
-): number | null {
-  if (!anchors.length) return null;
+export function msToFilePosition(
+  audioMs: number,
+  fileDurationsMs: number[],
+): { fileIndex: number; fileSeconds: number } {
+  if (!fileDurationsMs.length || audioMs <= 0) {
+    return { fileIndex: 0, fileSeconds: 0 };
+  }
 
-  const canonical = chapterIndex + fraction;
+  const totalAudioMs = fileDurationsMs.reduce((sum, duration) => sum + (duration ?? 0), 0);
+  if (audioMs >= totalAudioMs) {
+    const lastIndex = Math.max(0, fileDurationsMs.length - 1);
+    return { fileIndex: lastIndex, fileSeconds: (fileDurationsMs[lastIndex] ?? 0) / 1000 };
+  }
 
-  // Find the rightmost anchor whose chapterIndex <= canonical
-  let leftIdx = -1;
-  for (let i = 0; i < anchors.length; i++) {
-    if (anchors[i].chapterIndex <= canonical) {
-      leftIdx = i;
+  let cumulativeMs = 0;
+  for (let i = 0; i < fileDurationsMs.length; i++) {
+    const durationMs = fileDurationsMs[i] ?? 0;
+    if (cumulativeMs + durationMs > audioMs) {
+      return { fileIndex: i, fileSeconds: (audioMs - cumulativeMs) / 1000 };
     }
+    cumulativeMs += durationMs;
   }
 
-  // Canonical is before all anchors
-  if (leftIdx === -1) {
-    return anchors[0].audioMs;
-  }
-
-  // Canonical is at or past the last anchor — no right neighbour to interpolate with
-  if (leftIdx >= anchors.length - 1) {
-    return anchors[leftIdx].audioMs;
-  }
-
-  const rightIdx = leftIdx + 1;
-  const left = anchors[leftIdx];
-  const right = anchors[rightIdx];
-  const chapRange = right.chapterIndex - left.chapterIndex;
-  if (chapRange === 0) return left.audioMs;
-
-  const t = (canonical - left.chapterIndex) / chapRange;
-  return Math.round(left.audioMs + t * (right.audioMs - left.audioMs));
+  const lastIndex = Math.max(0, fileDurationsMs.length - 1);
+  return { fileIndex: lastIndex, fileSeconds: (fileDurationsMs[lastIndex] ?? 0) / 1000 };
 }
 
+export function percentageToAudioMs(pct: number, totalAudioMs: number): number {
+  if (!totalAudioMs || pct <= 0) return 0;
+  if (pct >= 1) return totalAudioMs;
+  return pct * totalAudioMs;
+}
+
+export function audioMsToPercentage(audioMs: number, totalAudioMs: number): number {
+  if (!totalAudioMs || audioMs <= 0) return 0;
+  if (audioMs >= totalAudioMs) return 1;
+  return audioMs / totalAudioMs;
+}
+
+export function refineChapterAnchor(
+  anchors: ChapterAnchor[],
+  confirmed: { chapterIndex: number; withinChapterFraction: number; audioMs: number },
+  totalAudioMs: number,
+): ChapterAnchor[] {
+  const confirmedKey = confirmed.chapterIndex + confirmed.withinChapterFraction;
+
+  const collisionIndex = anchors.findIndex((anchor) => Math.abs(canonicalKey(anchor) - confirmedKey) <= CANONICAL_EPSILON);
+  const superseded = new Set<number>();
+
+  if (collisionIndex >= 0) {
+    superseded.add(collisionIndex);
+  } else if (confirmed.withinChapterFraction > CANONICAL_EPSILON) {
+    const interiorIndex = anchors.findIndex(
+      (anchor) =>
+        anchor.source === 'confirmed' &&
+        anchor.chapterIndex === confirmed.chapterIndex &&
+        Math.floor(canonicalKey(anchor)) === confirmed.chapterIndex &&
+        Math.abs(anchor.withinChapterFraction - confirmed.withinChapterFraction) > CANONICAL_EPSILON,
+    );
+    if (interiorIndex >= 0) superseded.add(interiorIndex);
+  }
+
+  const surviving = anchors.filter((_, index) => !superseded.has(index));
+  const survivingConfirmed = surviving.filter((anchor) => anchor.source === 'confirmed');
+
+  const lowerConfirmed = survivingConfirmed
+    .filter((anchor) => canonicalKey(anchor) < confirmedKey - CANONICAL_EPSILON)
+    .sort((a, b) => canonicalKey(b) - canonicalKey(a))[0];
+  const upperConfirmed = survivingConfirmed
+    .filter((anchor) => canonicalKey(anchor) > confirmedKey + CANONICAL_EPSILON)
+    .sort((a, b) => canonicalKey(a) - canonicalKey(b))[0];
+
+  const lowMs = lowerConfirmed?.audioMs ?? 0;
+  const highMs = upperConfirmed?.audioMs ?? totalAudioMs;
+  const hasLowerReal = lowerConfirmed != null;
+  const hasUpperReal = upperConfirmed != null;
+
+  if ((hasLowerReal ? confirmed.audioMs <= lowMs : confirmed.audioMs < 0) ||
+      (hasUpperReal ? confirmed.audioMs >= highMs : confirmed.audioMs > totalAudioMs)) {
+    return anchors;
+  }
+
+  const next: ChapterAnchor[] = surviving.map((anchor) => ({ ...anchor }));
+  const confirmedAnchor: ChapterAnchor = {
+    chapterIndex: confirmed.chapterIndex,
+    withinChapterFraction: confirmed.withinChapterFraction,
+    audioMs: confirmed.audioMs,
+    source: 'confirmed',
+  };
+
+  if (collisionIndex >= 0) {
+    const insertAt = next.findIndex((anchor) => canonicalKey(anchor) > confirmedKey);
+    if (insertAt === -1) next.push(confirmedAnchor);
+    else next.splice(insertAt, 0, confirmedAnchor);
+  } else {
+    const insertAt = next.findIndex((anchor) => canonicalKey(anchor) > confirmedKey);
+    if (insertAt === -1) next.push(confirmedAnchor);
+    else next.splice(insertAt, 0, confirmedAnchor);
+  }
+
+  let newIndex = next.findIndex((anchor) => Math.abs(canonicalKey(anchor) - confirmedKey) <= CANONICAL_EPSILON);
+
+  for (let i = newIndex - 1; i >= 0; i--) {
+    const neighborMs = next[i + 1].audioMs;
+    const current = next[i];
+    if (current.audioMs < neighborMs) continue;
+
+    const clamped = neighborMs - 1;
+    if (clamped <= lowMs) {
+      next.splice(i, 1);
+      newIndex--;
+      continue;
+    }
+
+    current.audioMs = clamped;
+    current.source = 'proportional-fallback';
+    delete current.confidence;
+  }
+
+  for (let i = newIndex + 1; i < next.length; i++) {
+    const neighborMs = next[i - 1].audioMs;
+    const current = next[i];
+    if (current.audioMs > neighborMs) continue;
+
+    const clamped = neighborMs + 1;
+    if (clamped >= highMs) {
+      next.splice(i, 1);
+      i--;
+      continue;
+    }
+
+    current.audioMs = clamped;
+    current.source = 'proportional-fallback';
+    delete current.confidence;
+  }
+
+  return next.sort((a, b) => {
+    const keyDelta = canonicalKey(a) - canonicalKey(b);
+    if (Math.abs(keyDelta) > CANONICAL_EPSILON) return keyDelta;
+    return a.audioMs - b.audioMs;
+  });
+}
