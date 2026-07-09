@@ -426,10 +426,15 @@ export default function ReaderScreen() {
     const canonicalFrac = canonicalWithinChapterFractionRef.current;
 
     if (map && canonicalCh >= 0) {
-      const totalAudioMs = (b.session.audioFileDurations ?? []).reduce((sum, duration) => sum + (duration ?? 0), 0) * 1000;
+      const totalAudioMs = map.totalAudioMs;
+      const confirmed = {
+        chapterIndex: canonicalCh,
+        withinChapterFraction: syncBanner.targetMode === 'ebook' ? 0 : canonicalFrac,
+        audioMs,
+      };
       const refined = refineChapterAnchor(
         map.chapterAnchors,
-        { chapterIndex: canonicalCh, withinChapterFraction: canonicalFrac, audioMs },
+        confirmed,
         totalAudioMs,
       );
       if (refined !== map.chapterAnchors) {

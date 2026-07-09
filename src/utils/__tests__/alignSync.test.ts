@@ -266,6 +266,15 @@ describe('audioMsToChapterPosition', () => {
     expect(audioMsToChapterPosition(anchors, 120_004)).toEqual({ chapterIndex: 3, withinChapterFraction: 1 });
   });
 
+  it('clamps exact last-anchor equality to fraction 1', () => {
+    const anchors = [
+      { chapterIndex: 2, withinChapterFraction: 0, audioMs: 60_000, source: 'proportional-fallback' as const },
+      { chapterIndex: 3, withinChapterFraction: 0, audioMs: 120_000, source: 'proportional-fallback' as const },
+    ];
+
+    expect(audioMsToChapterPosition(anchors, 120_000)).toEqual({ chapterIndex: 3, withinChapterFraction: 1 });
+  });
+
   it('returns the single anchor in both directions', () => {
     const anchors = [
       { chapterIndex: 3, withinChapterFraction: 0, audioMs: 500_000, source: 'proportional-fallback' as const },
@@ -326,6 +335,17 @@ describe('refineChapterAnchor', () => {
     expect(result).toEqual([
       { chapterIndex: 5, withinChapterFraction: 0, audioMs: 2_850_000, source: 'confirmed' },
     ]);
+    expectStrictAscending(result);
+  });
+
+  it('preserves the stored fraction on a near-epsilon collision', () => {
+    const input = [anchor(5, 0.500000000, 3_000_000)];
+    const result = refineChapterAnchor(input, { chapterIndex: 5, withinChapterFraction: 0.5000000004, audioMs: 2_850_000 }, 4_000_000);
+
+    expect(result).toEqual([
+      { chapterIndex: 5, withinChapterFraction: 0.5, audioMs: 2_850_000, source: 'confirmed' },
+    ]);
+    expect(result[0].withinChapterFraction).toBe(0.5);
     expectStrictAscending(result);
   });
 

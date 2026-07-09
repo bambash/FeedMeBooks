@@ -149,7 +149,7 @@ export function audioMsToChapterPosition(anchors: ChapterAnchor[], audioMs: numb
   if (audioMs <= first.audioMs) {
     return { chapterIndex: first.chapterIndex, withinChapterFraction: 0 };
   }
-  if (audioMs > last.audioMs) {
+  if (audioMs >= last.audioMs) {
     return { chapterIndex: last.chapterIndex, withinChapterFraction: 1 };
   }
 
@@ -261,22 +261,24 @@ export function refineChapterAnchor(
   }
 
   const next: ChapterAnchor[] = surviving.map((anchor) => ({ ...anchor }));
-  const confirmedAnchor: ChapterAnchor = {
-    chapterIndex: confirmed.chapterIndex,
-    withinChapterFraction: confirmed.withinChapterFraction,
-    audioMs: confirmed.audioMs,
-    source: 'confirmed',
-  };
+  const collidedAnchor = collisionIndex >= 0 ? anchors[collisionIndex] : null;
+  const confirmedAnchor: ChapterAnchor = collidedAnchor
+    ? {
+        chapterIndex: collidedAnchor.chapterIndex,
+        withinChapterFraction: collidedAnchor.withinChapterFraction,
+        audioMs: confirmed.audioMs,
+        source: 'confirmed',
+      }
+    : {
+        chapterIndex: confirmed.chapterIndex,
+        withinChapterFraction: confirmed.withinChapterFraction,
+        audioMs: confirmed.audioMs,
+        source: 'confirmed',
+      };
 
-  if (collisionIndex >= 0) {
-    const insertAt = next.findIndex((anchor) => canonicalKey(anchor) > confirmedKey);
-    if (insertAt === -1) next.push(confirmedAnchor);
-    else next.splice(insertAt, 0, confirmedAnchor);
-  } else {
-    const insertAt = next.findIndex((anchor) => canonicalKey(anchor) > confirmedKey);
-    if (insertAt === -1) next.push(confirmedAnchor);
-    else next.splice(insertAt, 0, confirmedAnchor);
-  }
+  const insertAt = next.findIndex((anchor) => canonicalKey(anchor) > confirmedKey);
+  if (insertAt === -1) next.push(confirmedAnchor);
+  else next.splice(insertAt, 0, confirmedAnchor);
 
   let newIndex = next.findIndex((anchor) => Math.abs(canonicalKey(anchor) - confirmedKey) <= CANONICAL_EPSILON);
 
