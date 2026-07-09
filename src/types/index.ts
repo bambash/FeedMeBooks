@@ -51,54 +51,42 @@ export interface BookSession {
   positionMapCreatedAt?: number;
 }
 
-/** A single anchor point in the audio↔ebook position map */
-export interface PositionAnchor {
-  /** Milliseconds from the start of the whole audiobook */
-  audioMs: number;
-  /** Index into book.audioUris[] */
-  fileIndex: number;
-  /** Seconds within that file */
-  fileSeconds: number;
-  /** epub.js spine chapter index (0-based) */
+export interface ChapterAnchor {
+  /** epub.js spine index (0-based) this anchor is within */
   chapterIndex: number;
-  /** 0–1 position within the chapter (reserved for future fine-grained sync) */
+  /** Canonical key component. Boundary anchors use 0 for chapter-boundary anchors;
+   *  only confirmed interior anchors carry a real measured fraction.
+   *  chapterIndex + withinChapterFraction is the anchor's canonical key, the single
+   *  sort/lookup axis.
+   */
   withinChapterFraction: number;
-  /** How this anchor was derived */
-  source?: 'proportional' | 'transcript';
-}
-
-/** Position map for an audiobook+ebook pair, stored separately in AsyncStorage */
-export interface PositionMap {
-  bookId: string;
-  createdAt: number; // unix ms
-  totalAudioMs: number;
-  /** Sorted ascending by audioMs */
-  anchors: PositionAnchor[];
-  /** Whether this was migrated from a legacy SyncMap */
-  migratedFromSyncMap?: boolean;
-}
-
-/** @deprecated Use PositionAnchor instead */
-export interface SyncPoint {
-  /** Milliseconds from the start of the whole audiobook */
+  /** Milliseconds from the start of the whole audiobook at this canonical position */
   audioMs: number;
-  /** Index into book.audioUris[] */
-  fileIndex: number;
-  /** Seconds within that file */
-  fileSeconds: number;
-  /** epub.js spine chapter index (0-based) */
+  /** Alignment source for this anchor. */
+  source: 'forced-alignment' | 'proportional-fallback' | 'confirmed';
+  /** Word-overlap match score (0-1); present only when source === 'forced-alignment'. */
+  confidence?: number;
+}
+
+export interface ChapterPosition {
   chapterIndex: number;
-  /** 0–1 position within the chapter (reserved for future fine-grained sync) */
+  /** 0-1 position within this chapter's interpolation segment. One definition shared
+   *  by both sync directions.
+   */
   withinChapterFraction: number;
 }
 
-/** @deprecated Use PositionMap instead */
-export interface SyncMap {
+export interface AudiobookPositionMap {
   bookId: string;
-  createdAt: number; // unix ms
+  createdAt: number;
   totalAudioMs: number;
-  /** Sorted ascending by audioMs */
-  points: SyncPoint[];
+  /** Sorted ascending by canonical key (equivalently by audioMs). Invariant: one
+   *  boundary entry per content chapter at construction, plus at most one interior
+   *  confirmed entry per chapter. chapterIndex is not unique; never look up by it alone.
+   */
+  chapterAnchors: ChapterAnchor[];
+  /** 'unavailable' when no chapter resolved as forced-alignment. */
+  builtFrom: 'transcript' | 'unavailable';
 }
 
 export interface Book {

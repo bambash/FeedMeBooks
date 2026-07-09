@@ -1,0 +1,4 @@
+id: rebuild-chapter-sync
+status: proposed
+created: 2026-07-08
+description: Replace the broken audiobook↔ebook chapter sync engine with Chapter Boundary Alignment over existing word-level Whisper timestamps, one canonical anchor/position type model, explicit per-format sync strategies, and corrected progressive refinement.
