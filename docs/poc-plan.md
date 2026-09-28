@@ -88,7 +88,7 @@ reader, offer an audio→text jump if listening is fresher. On pressing play,
 offer a text→audio jump if reading is fresher. Show "Finding your place…"
 while the probe runs (target < 5s).
 
-## Architecture (single Gradle project, `android/` or a new repo)
+## Architecture (single Gradle project in `native/`)
 
 ```
 :core   pure Kotlin/JVM: text normalization, anchors, interpolation, matcher
