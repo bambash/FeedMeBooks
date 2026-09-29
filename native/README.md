@@ -10,8 +10,22 @@ See [`../docs/poc-plan.md`](../docs/poc-plan.md) for the plan and decisions.
   - `AnchorMap`: piecewise-linear text ↔ audio mapping learned from confirmed matches.
   - `Matcher`: token-level Smith–Waterman that finds a noisy transcript in the book.
   - `Handoff`: `audioToText` / `textToAudio` built on a pluggable `Transcriber` (whisper.cpp in the app).
-- `:app` — Android app. For now it's a spike screen that runs `:core` on the device
-  (smoke test + matcher speed on a novel-length book). Readium, Media3 and whisper.cpp come next.
+- `:app` — the Android app.
+  - `library/`: the launcher. Adding a book copies in its EPUB (title, author, cover),
+    then takes the audiobook folder (persisted permission, natural filename order).
+    `BookStore` keeps one JSON record per book: both positions, their timestamps, and
+    the learned anchors.
+  - `playback/`: `PlaybackService` (Media3 session + ExoPlayer) plays the whole
+    audiobook in the background with notification and lock-screen controls, and saves
+    the position. `PlayerLink` is the UI's handle on it, in global audiobook time.
+  - `book/`: `BookActivity` is the Readium reader with a mini player, and offers the
+    handoffs. `HandoffEngine` runs `:core` over Whisper and persists the anchors.
+  - `reader/PageProbe`: asks the rendered page what's on screen, because Readium's
+    own answers were off by a page on a real book.
+  - `whisper/`, `audio/`: whisper.cpp JNI, the model download, and MP4/MP3 decoding
+    stitched across files.
+  - `LabActivity` + `reader/ReaderSpikeActivity`: the spike screens (Whisper speed,
+    handoff test, navigation test), reached from the library's "Lab" button.
 
 ## Test
 

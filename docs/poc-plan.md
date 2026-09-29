@@ -142,6 +142,13 @@ Then:
 4. Library + import + ExoPlayer playlist with background/lockscreen controls.
 5. Audio → text handoff end to end.
 6. Text → audio handoff end to end.
+
+   **4–6 built as v1** (`library/`, `playback/`, `book/`): books persist with
+   both positions and learned anchors; audio plays from a Media3
+   `MediaSessionService`; handoffs are offered (return after listening →
+   "continue reading where the narrator is?", play after reading → "start
+   the audio from this page?"), land on the exact top line / sentence, and
+   highlight the sentence. The spikes live on under "Lab".
 7. Test on real books: pick 2–3 DRM-free EPUB + audiobook pairs (e.g. Standard Ebooks +
    LibriVox recordings of the same public-domain edition) and record switch accuracy.
 
