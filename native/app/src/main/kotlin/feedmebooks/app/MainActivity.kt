@@ -21,6 +21,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -96,6 +97,7 @@ private fun SpikeCard(title: String, subtitle: String, content: @Composable () -
 }
 
 /** Spike S2: how fast is on-device Whisper on a 20 s slice of a real MP3? */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun WhisperCard() {
     val context = LocalContext.current
@@ -210,7 +212,7 @@ private fun ReaderCard() {
         busy = true
         scope.launch {
             report = try {
-                val book = LoadedBook.open(context, uri) { report = it }
+                val book = withContext(Dispatchers.IO) { LoadedBook.open(context, uri) { report = it } }
                 SpikeState.book = book
                 context.startActivity(Intent(context, ReaderSpikeActivity::class.java))
                 "${book.title}: ${book.text.sectionCount} sections, ${book.text.paragraphs.size} paragraphs, " +

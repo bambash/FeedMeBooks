@@ -57,6 +57,8 @@ android {
     }
 
     compileOptions {
+        // Readium uses java.time etc. below its minSdk and ships with desugaring enabled.
+        isCoreLibraryDesugaringEnabled = true
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
@@ -71,6 +73,7 @@ kotlin {
 
 dependencies {
     implementation(project(":core"))
+    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.5")
 
     implementation(platform("androidx.compose:compose-bom:2024.12.01"))
     implementation("androidx.compose.material3:material3")
@@ -78,6 +81,7 @@ dependencies {
     implementation("androidx.activity:activity-compose:1.9.3")
     implementation("androidx.appcompat:appcompat:1.7.0")
     implementation("androidx.fragment:fragment-ktx:1.8.7")
+    implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.9.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
 
     // 3.1.x is the newest line that builds against compileSdk 35 (3.2+ needs 36).
