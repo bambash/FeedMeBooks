@@ -94,16 +94,16 @@ class ReaderSpikeActivity : AppCompatActivity() {
                 Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text(status, style = MaterialTheme.typography.bodySmall)
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Button(onClick = { run { status = describe(jump(randomParagraph())) } }, enabled = !busy) { Text("Jump") }
-                        Button(onClick = { run { status = whereAmI() } }, enabled = !busy) { Text("Where am I?") }
-                        Button(onClick = { run { status = jumpMany(10) } }, enabled = !busy) { Text("Run 10") }
+                        Button(onClick = { launchAction { status = describe(jump(randomParagraph())) } }, enabled = !busy) { Text("Jump") }
+                        Button(onClick = { launchAction { status = whereAmI() } }, enabled = !busy) { Text("Where am I?") }
+                        Button(onClick = { launchAction { status = jumpMany(10) } }, enabled = !busy) { Text("Run 10") }
                     }
                 }
             }
         }
     }
 
-    private fun run(block: suspend () -> Unit) {
+    private fun launchAction(block: suspend () -> Unit) {
         busy = true
         lifecycleScope.launch {
             try {
