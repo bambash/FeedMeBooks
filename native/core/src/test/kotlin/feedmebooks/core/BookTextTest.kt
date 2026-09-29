@@ -52,4 +52,25 @@ class BookTextTest {
         assertEquals(book.text.indexOf("was a bright"), book.resolve(2, 0.0, "was"))
         assertEquals(book.charOffsetOf(2, 0.5), book.resolve(2, 0.5, "not in the book"))
     }
+
+    @Test
+    fun `finds the sentence around an offset`() {
+        val text = BookText.build(
+            listOf(
+                Section(
+                    "ch.xhtml",
+                    listOf(
+                        "Dalinar hiked up the rubble. Kholinar had been . . . storm it, Kholinar was . . . a grand city. \"Stop!\" she said. It ended…",
+                        "Unite them.",
+                    ),
+                ),
+            ),
+        )
+        fun sentence(of: String) = text.sentenceAt(text.text.indexOf(of)).let { text.text.substring(it.first, it.last + 1) }
+        assertEquals("Dalinar hiked up the rubble.", sentence("rubble"))
+        assertEquals("Kholinar had been . . . storm it, Kholinar was . . . a grand city.", sentence("storm it"))
+        assertEquals("\"Stop!\" she said.", sentence("she said"))
+        assertEquals("It ended…", sentence("ended"))
+        assertEquals("Unite them.", sentence("Unite"))
+    }
 }

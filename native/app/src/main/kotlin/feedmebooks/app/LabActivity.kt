@@ -57,7 +57,8 @@ import kotlinx.coroutines.withContext
 import kotlin.random.Random
 import kotlin.system.measureTimeMillis
 
-class MainActivity : ComponentActivity() {
+/** The spike screens: Whisper speed, the handoff test reader, and matcher checks. Reached from the library. */
+class LabActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContent {
@@ -74,7 +75,7 @@ private fun SpikeScreen() {
         Modifier.safeDrawingPadding().padding(16.dp).verticalScroll(rememberScrollState()),
         verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
-        Text("FeedMeBooks POC", style = MaterialTheme.typography.headlineSmall)
+        Text("Lab", style = MaterialTheme.typography.headlineSmall)
         Text(
             "v${BuildConfig.VERSION_NAME} · ${BuildConfig.GIT_SHA} · ${Build.MANUFACTURER} ${Build.MODEL} · Android ${Build.VERSION.RELEASE}",
             style = MaterialTheme.typography.bodySmall,

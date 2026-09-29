@@ -19,6 +19,10 @@ data class ParagraphRef(
     val charEnd: Int,
 )
 
+private const val TERMINATORS = ".!?…"
+private const val CLOSERS = "\"'”’)]"
+private const val OPENERS = "\"'“‘(["
+
 object Normalize {
     private val WHITESPACE = Regex("\\s+")
     private val WORD = Regex("[\\p{L}\\p{N}]+(?:['’][\\p{L}\\p{N}]+)*")
@@ -71,6 +75,44 @@ class BookText private constructor(
             if (paragraphs[mid].charStart <= charOffset) lo = mid else hi = mid - 1
         }
         return paragraphs[lo]
+    }
+
+    /**
+     * The sentence containing [charOffset], clamped to its paragraph. Used to highlight
+     * exactly where a handoff resumes. Handles closing quotes after the terminator
+     * ("Stop!" she said.) and ellipses written as ". . ." or "…".
+     */
+    fun sentenceAt(charOffset: Int): IntRange {
+        val para = paragraphAt(charOffset)
+        val at = charOffset.coerceIn(para.charStart, (para.charEnd - 1).coerceAtLeast(para.charStart))
+        var start = para.charStart
+        for (i in at - 1 downTo para.charStart) {
+            if (isSentenceBreak(i, para.charEnd)) {
+                start = i + 1
+                break
+            }
+        }
+        while (start < at && text[start] == ' ') start++
+        var end = para.charEnd
+        for (i in at until para.charEnd) {
+            if (isSentenceBreak(i, para.charEnd)) {
+                end = i // the break is the space after the terminator
+                break
+            }
+        }
+        return start until end
+    }
+
+    /** True if position [i] ends a sentence: a terminator (plus closing quotes) followed by a space and a capital or quote. */
+    private fun isSentenceBreak(i: Int, limit: Int): Boolean {
+        if (text[i] != ' ' || i + 1 >= limit) return false
+        var j = i - 1
+        while (j >= 0 && text[j] in CLOSERS) j--
+        if (j < 0 || text[j] !in TERMINATORS) return false
+        // ". . ." mid-sentence ellipsis: the dot before is part of it, not an ending.
+        if (text[j] == '.' && j >= 2 && text[j - 1] == ' ' && text[j - 2] == '.') return false
+        val next = text[i + 1]
+        return next.isUpperCase() || next in OPENERS
     }
 
     fun sectionStart(sectionIndex: Int): Int = sectionStarts[sectionIndex]

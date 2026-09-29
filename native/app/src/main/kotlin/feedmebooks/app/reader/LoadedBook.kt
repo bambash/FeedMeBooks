@@ -69,24 +69,60 @@ class LoadedBook(
             ?.value
     }
 
+    private fun paragraphText(p: ParagraphRef) = text.text.substring(p.charStart, p.charEnd)
+
+    /** Book offset of the [compactOffset]-th visible character of [paragraph] (see [PageProbe]). */
+    fun charOffsetOf(paragraph: ParagraphRef, compactOffset: Int): Int =
+        paragraph.charStart + PageProbe.rawIndex(paragraphText(paragraph), compactOffset).coerceAtMost(paragraph.charEnd - paragraph.charStart - 1)
+
+    /** Inverse of [charOffsetOf]: compact position of [charOffset] inside its paragraph. */
+    fun compactOffsetOf(charOffset: Int): Int {
+        val p = text.paragraphAt(charOffset)
+        return PageProbe.compactIndex(paragraphText(p), charOffset - p.charStart)
+    }
+
+    /**
+     * A locator for just the sentence containing [charOffset]: the paragraph's locator
+     * (resource + CSS selector) narrowed by a text quote, so Readium can highlight it.
+     */
+    fun sentenceLocator(charOffset: Int): Locator {
+        val p = text.paragraphAt(charOffset)
+        val sentence = text.sentenceAt(charOffset)
+        val quote = Locator.Text(
+            before = text.text.substring(maxOf(p.charStart, sentence.first - QUOTE_CONTEXT), sentence.first),
+            highlight = text.text.substring(sentence.first, sentence.last + 1),
+            after = text.text.substring(sentence.last + 1, minOf(p.charEnd, sentence.last + 1 + QUOTE_CONTEXT)),
+        )
+        return locatorOf(p).copy(text = quote)
+    }
+
     companion object {
         private const val PREFIX_LENGTH = 40
+        private const val QUOTE_CONTEXT = 50
 
-        @OptIn(ExperimentalReadiumApi::class)
+        suspend fun openPublication(context: Context, file: File): Publication {
+            val http = DefaultHttpClient()
+            val assets = AssetRetriever(context.contentResolver, http)
+            val opener = PublicationOpener(DefaultPublicationParser(context, http, assets, pdfFactory = null))
+            val asset = assets.retrieve(file).getOrElse { error("Can't read file: ${it.message}") }
+            return opener.open(asset, allowUserInteraction = false)
+                .getOrElse { error("Can't open EPUB: ${it.message}") }
+        }
+
+        /** Lab entry point: copies a picked document and loads it fully. */
         suspend fun open(context: Context, uri: Uri, onProgress: (String) -> Unit): LoadedBook {
             onProgress("Copying file…")
             // Readium reads local files most reliably; copy the picked document once.
             val file = File(context.cacheDir, "book.epub")
             context.contentResolver.openInputStream(uri)!!.use { input -> file.outputStream().use { input.copyTo(it) } }
-
             onProgress("Opening EPUB…")
-            val http = DefaultHttpClient()
-            val assets = AssetRetriever(context.contentResolver, http)
-            val opener = PublicationOpener(DefaultPublicationParser(context, http, assets, pdfFactory = null))
-            val asset = assets.retrieve(file).getOrElse { error("Can't read file: ${it.message}") }
-            val publication = opener.open(asset, allowUserInteraction = false)
-                .getOrElse { error("Can't open EPUB: ${it.message}") }
+            val publication = openPublication(context, file)
+            return extract(publication, publication.metadata.title ?: file.name, onProgress)
+        }
 
+        /** Walks the publication's content once, pairing each paragraph with its locator. A few seconds for a long novel. */
+        @OptIn(ExperimentalReadiumApi::class)
+        suspend fun extract(publication: Publication, title: String, onProgress: (String) -> Unit = {}): LoadedBook {
             val sections = ArrayList<Section>()
             val locators = ArrayList<List<Locator>>()
             val extractMs = measureTimeMillis {
@@ -108,7 +144,6 @@ class LoadedBook(
                     locators += value.second
                 }
             }
-            val title = publication.metadata.title ?: file.name
             return LoadedBook(publication, title, BookText.build(sections), locators, extractMs)
         }
     }
