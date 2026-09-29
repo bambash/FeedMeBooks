@@ -100,7 +100,7 @@ class ReaderSpikeActivity : AppCompatActivity() {
                 prepare()
                 addListener(object : Player.Listener {
                     override fun onIsPlayingChanged(playing: Boolean) {
-                        isPlaying = playing
+                        this@ReaderSpikeActivity.isPlaying = playing
                     }
                 })
             }
