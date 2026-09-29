@@ -91,8 +91,3 @@ class LoadedBook(
         }
     }
 }
-
-/** Hand-off between the launcher and the reader activity (a spike; no persistence yet). */
-object SpikeState {
-    var book: LoadedBook? = null
-}

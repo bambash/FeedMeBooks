@@ -127,6 +127,11 @@ Spikes first, because each one kills the plan if it fails:
 
 Then:
 
+- **Handoff spike (in the POC APK now).** EPUB + a folder of audio files → one
+  timeline (`AudioTimeline` in `:core`: natural filename order, global ms ↔
+  file + offset, decoding windows that straddle a file boundary). The reader
+  screen plays the whole book and has "Read from here" / "Listen from here".
+
 4. Library + import + ExoPlayer playlist with background/lockscreen controls.
 5. Audio → text handoff end to end.
 6. Text → audio handoff end to end.

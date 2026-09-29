@@ -40,12 +40,12 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
+import feedmebooks.app.audio.Playlist
+import feedmebooks.app.audio.formatDuration
 import feedmebooks.app.reader.LoadedBook
 import feedmebooks.app.reader.ReaderSpikeActivity
-import feedmebooks.app.reader.SpikeState
 import feedmebooks.app.whisper.AudioDecoder
 import feedmebooks.app.whisper.ModelStore
-import feedmebooks.app.whisper.Whisper
 import feedmebooks.app.whisper.WhisperModel
 import feedmebooks.core.BookText
 import feedmebooks.core.Matcher
@@ -80,7 +80,7 @@ private fun SpikeScreen() {
             style = MaterialTheme.typography.bodySmall,
         )
         WhisperCard()
-        ReaderCard()
+        HandoffCard()
         MatcherCard()
     }
 }
@@ -102,20 +102,19 @@ private fun SpikeCard(title: String, subtitle: String, content: @Composable () -
  */
 private val AUDIOBOOK_TYPES = arrayOf("audio/*", "video/mp4")
 
-/** Spike S2: how fast is on-device Whisper on a 20 s slice of a real MP3? */
+/** Spike S2: how fast is on-device Whisper on a 20 s slice of a real audiobook file? */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun WhisperCard() {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    var model by remember { mutableStateOf(WhisperModel.TINY_EN) }
-    var threads by remember { mutableStateOf(4) }
+    var model by remember { mutableStateOf(SpikeState.selectedModel) }
+    var threads by remember { mutableStateOf(SpikeState.threads) }
     var audio by remember { mutableStateOf<Uri?>(null) }
     var audioMs by remember { mutableStateOf(0L) }
     var startSec by remember { mutableStateOf("") }
     var report by remember { mutableStateOf("") }
     var busy by remember { mutableStateOf(false) }
-    var loaded by remember { mutableStateOf<Pair<WhisperModel, Whisper>?>(null) }
     var downloadedVersion by remember { mutableStateOf(0) } // bump to recheck files
     val downloaded = remember(model, downloadedVersion) { ModelStore.isDownloaded(context, model) }
 
@@ -132,12 +131,12 @@ private fun WhisperCard() {
     SpikeCard("Whisper speed", "Transcribes 20 s of an audiobook file (MP4/M4A/M4B/MP3) on this phone. Target: under 5 s.") {
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             WhisperModel.entries.forEach { m ->
-                FilterChip(selected = model == m, onClick = { model = m }, label = { Text("${m.label} (${m.approxMb} MB)") })
+                FilterChip(selected = model == m, onClick = { model = m; SpikeState.selectedModel = m }, label = { Text("${m.label} (${m.approxMb} MB)") })
             }
         }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             listOf(2, 4, 6, 8).forEach { t ->
-                FilterChip(selected = threads == t, onClick = { threads = t }, label = { Text("$t threads") })
+                FilterChip(selected = threads == t, onClick = { threads = t; SpikeState.threads = t }, label = { Text("$t threads") })
             }
         }
         if (!downloaded) {
@@ -177,14 +176,7 @@ private fun WhisperCard() {
                         val startMs = (startSec.toLongOrNull() ?: 0L) * 1000
                         lateinit var samples: FloatArray
                         val decodeMs = measureTimeMillis { samples = AudioDecoder.decode(context, uri, startMs, 20_000) }
-                        var loadMs = 0L
-                        val whisper = loaded?.takeIf { it.first == model }?.second ?: run {
-                            loaded?.second?.close()
-                            lateinit var w: Whisper
-                            loadMs = measureTimeMillis { w = Whisper.load(ModelStore.file(context, model)) }
-                            loaded = model to w
-                            w
-                        }
+                        val (whisper, loadMs) = SpikeState.whisper(context, model)
                         lateinit var words: List<TranscriptWord>
                         val transcribeMs = measureTimeMillis { words = whisper.transcribe(samples, startMs, threads) }
                         val audioSec = samples.size / AudioDecoder.SAMPLE_RATE.toDouble()
@@ -206,38 +198,71 @@ private fun WhisperCard() {
     }
 }
 
-/** Spike S3: can Readium land precisely on a mid-chapter paragraph? */
+/**
+ * The end-to-end handoff: an EPUB plus the audiobook's folder of files, joined into one
+ * timeline. The reader screen plays the audio and switches in both directions.
+ */
 @Composable
-private fun ReaderCard() {
+private fun HandoffCard() {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    var report by remember { mutableStateOf("") }
+    var bookInfo by remember { mutableStateOf(SpikeState.book?.let(::describeBook) ?: "") }
+    var audioInfo by remember { mutableStateOf(SpikeState.playlist?.let(::describePlaylist) ?: "") }
     var busy by remember { mutableStateOf(false) }
+
     val pickEpub = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri == null) return@rememberLauncherForActivityResult
         busy = true
         scope.launch {
-            report = try {
-                val book = withContext(Dispatchers.IO) { LoadedBook.open(context, uri) { report = it } }
+            bookInfo = try {
+                val book = withContext(Dispatchers.IO) { LoadedBook.open(context, uri) { bookInfo = it } }
                 SpikeState.book = book
-                context.startActivity(Intent(context, ReaderSpikeActivity::class.java))
-                "${book.title}: ${book.text.sectionCount} sections, ${book.text.paragraphs.size} paragraphs, " +
-                    "${book.text.words.size} words (text extracted in ${book.extractMs} ms)"
+                describeBook(book)
             } catch (e: Throwable) {
                 "Failed: $e"
             }
             busy = false
         }
     }
-    SpikeCard("Reader navigation", "Opens an EPUB in Readium, jumps to random mid-chapter paragraphs and checks where it landed.") {
-        Button(onClick = { pickEpub.launch(arrayOf("application/epub+zip")) }, enabled = !busy) { Text("Open an EPUB") }
-        if (SpikeState.book != null && !busy) {
-            OutlinedButton(onClick = { context.startActivity(Intent(context, ReaderSpikeActivity::class.java)) }) {
-                Text("Reopen reader")
+    val pickFolder = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        busy = true
+        scope.launch {
+            audioInfo = try {
+                val playlist = withContext(Dispatchers.IO) { Playlist.fromFolder(context, uri) { audioInfo = it } }
+                SpikeState.playlist = playlist
+                describePlaylist(playlist)
+            } catch (e: Throwable) {
+                "Failed: $e"
             }
+            busy = false
         }
-        if (report.isNotEmpty()) Text(report, style = MaterialTheme.typography.bodySmall)
     }
+
+    SpikeCard(
+        "Handoff",
+        "Pick the EPUB and the folder holding the audiobook's files. They're played as one continuous book, " +
+            "in filename order. Switching needs a Whisper model (download one above).",
+    ) {
+        OutlinedButton(onClick = { pickEpub.launch(arrayOf("application/epub+zip")) }, enabled = !busy) { Text("1. Open the EPUB") }
+        if (bookInfo.isNotEmpty()) Text(bookInfo, style = MaterialTheme.typography.bodySmall)
+        OutlinedButton(onClick = { pickFolder.launch(null) }, enabled = !busy) { Text("2. Pick the audiobook folder") }
+        if (audioInfo.isNotEmpty()) Text(audioInfo, style = MaterialTheme.typography.bodySmall)
+        Button(
+            onClick = { context.startActivity(Intent(context, ReaderSpikeActivity::class.java)) },
+            enabled = !busy && SpikeState.book != null,
+        ) { Text(if (SpikeState.playlist == null) "3. Open reader (no audio)" else "3. Open reader + player") }
+    }
+}
+
+private fun describeBook(book: LoadedBook) =
+    "${book.title}: ${book.text.sectionCount} sections, ${book.text.paragraphs.size} paragraphs, " +
+        "${book.text.words.size} words (text extracted in ${book.extractMs} ms)"
+
+private fun describePlaylist(playlist: Playlist): String {
+    val names = playlist.tracks.map { it.name }
+    val shown = if (names.size <= 4) names.joinToString(", ") else "${names.take(2).joinToString(", ")} … ${names.last()}"
+    return "${playlist.tracks.size} files, ${formatDuration(playlist.timeline.totalMs)} total: $shown"
 }
 
 @Composable

@@ -89,6 +89,9 @@ dependencies {
     implementation("androidx.fragment:fragment-ktx:1.8.7")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.9.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
+    implementation("androidx.documentfile:documentfile:1.0.1")
+    // Same Media3 version Readium's navigator depends on.
+    implementation("androidx.media3:media3-exoplayer:1.7.1")
 
     // 3.1.x is the newest line that builds against compileSdk 35 (3.2+ needs 36).
     val readium = "3.1.2"
