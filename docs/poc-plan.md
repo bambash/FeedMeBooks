@@ -113,10 +113,17 @@ Spikes first, because each one kills the plan if it fails:
 1. **S1 — matcher on JVM (`:core`).** Build and test it against synthetic
    transcripts: dropped words, misspellings, repeated phrases, and a wrong prior.
    This can be done without a device.
+   **Done.** 20 JVM tests pass against a simulated audiobook. On a Galaxy S25
+   Ultra (Android 16), a 55-word transcript against a 100k-word book takes
+   24 ms whole-book and 8 ms windowed; indexing the book takes 0.5 s.
 2. **S2 — whisper.cpp on device.** Transcribe a 20s MP3 slice on a real Android
    phone with token timestamps. Go/no-go: < 5s wall time with tiny.en.
+   *Built into the POC APK ("Whisper speed" card); awaiting device numbers.*
 3. **S3 — Readium navigation.** Jump to an arbitrary text locator (mid-chapter)
    and decorate a paragraph. Also read back the current visible locator → charOffset.
+   *Built into the POC APK ("Reader navigation" card, "Run 10" self-checks
+   each jump); awaiting device results.* Readium's content iterator gives each
+   paragraph its own locator, so text ↔ reader positions map exactly.
 
 Then:
 

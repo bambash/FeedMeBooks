@@ -1,23 +1,34 @@
 package feedmebooks.app
 
+import android.content.Intent
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
+import androidx.compose.material3.Card
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -25,7 +36,16 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
+import feedmebooks.app.reader.LoadedBook
+import feedmebooks.app.reader.ReaderSpikeActivity
+import feedmebooks.app.reader.SpikeState
+import feedmebooks.app.whisper.AudioDecoder
+import feedmebooks.app.whisper.ModelStore
+import feedmebooks.app.whisper.Whisper
+import feedmebooks.app.whisper.WhisperModel
 import feedmebooks.core.BookText
 import feedmebooks.core.Matcher
 import feedmebooks.core.Section
@@ -49,30 +69,187 @@ class MainActivity : ComponentActivity() {
 
 @Composable
 private fun SpikeScreen() {
-    val scope = rememberCoroutineScope()
-    var report by remember { mutableStateOf("Tap a check to run it on this device.") }
-    var running by remember { mutableStateOf(false) }
-
-    fun run(block: () -> String) {
-        running = true
-        scope.launch {
-            report = withContext(Dispatchers.Default) { runCatching(block).getOrElse { "Failed: $it" } }
-            running = false
-        }
-    }
-
     Column(
         Modifier.safeDrawingPadding().padding(16.dp).verticalScroll(rememberScrollState()),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
+        verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
         Text("FeedMeBooks POC", style = MaterialTheme.typography.headlineSmall)
         Text(
             "v${BuildConfig.VERSION_NAME} · ${BuildConfig.GIT_SHA} · ${Build.MANUFACTURER} ${Build.MODEL} · Android ${Build.VERSION.RELEASE}",
             style = MaterialTheme.typography.bodySmall,
         )
-        Button(onClick = { run(::matcherSmokeTest) }, enabled = !running) { Text("Matcher smoke test") }
-        Button(onClick = { run(::matcherBenchmark) }, enabled = !running) { Text("Matcher speed, novel-length book") }
-        Text(if (running) "Running…" else report, style = MaterialTheme.typography.bodyMedium)
+        WhisperCard()
+        ReaderCard()
+        MatcherCard()
+    }
+}
+
+@Composable
+private fun SpikeCard(title: String, subtitle: String, content: @Composable () -> Unit) {
+    Card(Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text(title, style = MaterialTheme.typography.titleMedium)
+            Text(subtitle, style = MaterialTheme.typography.bodySmall)
+            content()
+        }
+    }
+}
+
+/** Spike S2: how fast is on-device Whisper on a 20 s slice of a real MP3? */
+@Composable
+private fun WhisperCard() {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var model by remember { mutableStateOf(WhisperModel.TINY_EN) }
+    var threads by remember { mutableStateOf(4) }
+    var audio by remember { mutableStateOf<Uri?>(null) }
+    var audioMs by remember { mutableStateOf(0L) }
+    var startSec by remember { mutableStateOf("") }
+    var report by remember { mutableStateOf("") }
+    var busy by remember { mutableStateOf(false) }
+    var loaded by remember { mutableStateOf<Pair<WhisperModel, Whisper>?>(null) }
+    var downloadedVersion by remember { mutableStateOf(0) } // bump to recheck files
+    val downloaded = remember(model, downloadedVersion) { ModelStore.isDownloaded(context, model) }
+
+    val pickAudio = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) {
+            audio = uri
+            scope.launch {
+                audioMs = withContext(Dispatchers.IO) { AudioDecoder.durationMs(context, uri) }
+                startSec = (audioMs / 1000 / 3).toString()
+            }
+        }
+    }
+
+    SpikeCard("Whisper speed", "Transcribes 20 s of an MP3 on this phone. Target: under 5 s.") {
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            WhisperModel.entries.forEach { m ->
+                FilterChip(selected = model == m, onClick = { model = m }, label = { Text("${m.label} (${m.approxMb} MB)") })
+            }
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            listOf(2, 4, 6, 8).forEach { t ->
+                FilterChip(selected = threads == t, onClick = { threads = t }, label = { Text("$t threads") })
+            }
+        }
+        if (!downloaded) {
+            Button(enabled = !busy, onClick = {
+                busy = true
+                scope.launch {
+                    report = try {
+                        withContext(Dispatchers.IO) {
+                            ModelStore.download(context, model) { p -> report = "Downloading ${model.label}… ${(p * 100).toInt()}%" }
+                        }
+                        downloadedVersion++
+                        "Downloaded ${model.label}."
+                    } catch (e: Exception) {
+                        "Download failed: $e"
+                    }
+                    busy = false
+                }
+            }) { Text("Download ${model.label}") }
+        }
+        OutlinedButton(onClick = { pickAudio.launch(arrayOf("audio/*")) }, enabled = !busy) {
+            Text(if (audio == null) "Pick an MP3" else "MP3: ${audio?.lastPathSegment?.substringAfterLast('/')} (${audioMs / 60_000} min)")
+        }
+        OutlinedTextField(
+            value = startSec,
+            onValueChange = { startSec = it.filter(Char::isDigit) },
+            label = { Text("Start at (seconds)") },
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+            singleLine = true,
+        )
+        Button(enabled = !busy && downloaded && audio != null, onClick = {
+            val uri = audio ?: return@Button
+            busy = true
+            report = "Running…"
+            scope.launch {
+                report = try {
+                    withContext(Dispatchers.Default) {
+                        val startMs = (startSec.toLongOrNull() ?: 0L) * 1000
+                        lateinit var samples: FloatArray
+                        val decodeMs = measureTimeMillis { samples = AudioDecoder.decode(context, uri, startMs, 20_000) }
+                        var loadMs = 0L
+                        val whisper = loaded?.takeIf { it.first == model }?.second ?: run {
+                            loaded?.second?.close()
+                            lateinit var w: Whisper
+                            loadMs = measureTimeMillis { w = Whisper.load(ModelStore.file(context, model)) }
+                            loaded = model to w
+                            w
+                        }
+                        lateinit var words: List<TranscriptWord>
+                        val transcribeMs = measureTimeMillis { words = whisper.transcribe(samples, startMs, threads) }
+                        val audioSec = samples.size / AudioDecoder.SAMPLE_RATE.toDouble()
+                        buildString {
+                            appendLine("${model.label}, $threads threads, ${"%.1f".format(audioSec)} s of audio")
+                            appendLine("Decode ${decodeMs} ms · model load ${if (loadMs > 0) "$loadMs ms" else "cached"} · transcribe $transcribeMs ms")
+                            appendLine("${"%.1f".format(audioSec * 1000 / transcribeMs)}× realtime · ${words.size} words")
+                            appendLine()
+                            append(words.joinToString(" ") { "[${"%.1f".format(it.startMs / 1000.0)}]${it.text}" })
+                        }
+                    }
+                } catch (e: Throwable) {
+                    "Failed: $e"
+                }
+                busy = false
+            }
+        }) { Text("Transcribe 20 s") }
+        if (report.isNotEmpty()) Text(report, style = MaterialTheme.typography.bodySmall)
+    }
+}
+
+/** Spike S3: can Readium land precisely on a mid-chapter paragraph? */
+@Composable
+private fun ReaderCard() {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var report by remember { mutableStateOf("") }
+    var busy by remember { mutableStateOf(false) }
+    val pickEpub = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        busy = true
+        scope.launch {
+            report = try {
+                val book = LoadedBook.open(context, uri) { report = it }
+                SpikeState.book = book
+                context.startActivity(Intent(context, ReaderSpikeActivity::class.java))
+                "${book.title}: ${book.text.sectionCount} sections, ${book.text.paragraphs.size} paragraphs, " +
+                    "${book.text.words.size} words (text extracted in ${book.extractMs} ms)"
+            } catch (e: Throwable) {
+                "Failed: $e"
+            }
+            busy = false
+        }
+    }
+    SpikeCard("Reader navigation", "Opens an EPUB in Readium, jumps to random mid-chapter paragraphs and checks where it landed.") {
+        Button(onClick = { pickEpub.launch(arrayOf("application/epub+zip")) }, enabled = !busy) { Text("Open an EPUB") }
+        if (SpikeState.book != null && !busy) {
+            OutlinedButton(onClick = { context.startActivity(Intent(context, ReaderSpikeActivity::class.java)) }) {
+                Text("Reopen reader")
+            }
+        }
+        if (report.isNotEmpty()) Text(report, style = MaterialTheme.typography.bodySmall)
+    }
+}
+
+@Composable
+private fun MatcherCard() {
+    val scope = rememberCoroutineScope()
+    var report by remember { mutableStateOf("") }
+    var busy by remember { mutableStateOf(false) }
+    fun run(block: () -> String) {
+        busy = true
+        scope.launch {
+            report = withContext(Dispatchers.Default) { runCatching(block).getOrElse { "Failed: $it" } }
+            busy = false
+        }
+    }
+    SpikeCard("Matcher", "Measured on an S25 Ultra: 24 ms whole-book, 8 ms windowed.") {
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedButton(onClick = { run(::matcherSmokeTest) }, enabled = !busy) { Text("Smoke test") }
+            OutlinedButton(onClick = { run(::matcherBenchmark) }, enabled = !busy) { Text("Speed") }
+        }
+        if (report.isNotEmpty()) Text(report, style = MaterialTheme.typography.bodySmall)
     }
 }
 
