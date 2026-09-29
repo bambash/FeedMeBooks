@@ -1,0 +1,62 @@
+name: Native APK
+
+# Builds the native Kotlin POC and publishes one installable APK per run.
+# Download: Actions → this workflow → a run → Artifacts → feedmebooks-poc-<sha>.
+
+on:
+  push:
+    paths:
+      - "native/**"
+      - ".github/workflows/native-apk.yml"
+  pull_request:
+    paths:
+      - "native/**"
+      - ".github/workflows/native-apk.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: native-apk-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  apk:
+    name: Test and build APK
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: native
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      # ubuntu-latest ships the Android SDK (ANDROID_HOME); AGP fetches any missing platform.
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Core tests
+        run: ./gradlew :core:test --no-daemon
+
+      - name: Build release APK
+        run: ./gradlew :app:assembleRelease --no-daemon --stacktrace
+
+      - name: Name APK
+        id: apk
+        run: |
+          name="feedmebooks-poc-${GITHUB_SHA::7}"
+          mv app/build/outputs/apk/release/app-release.apk "$name.apk"
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.apk.outputs.name }}
+          path: native/${{ steps.apk.outputs.name }}.apk
+          if-no-files-found: error
+          retention-days: 30

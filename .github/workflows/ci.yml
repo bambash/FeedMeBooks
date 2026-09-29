@@ -81,9 +81,8 @@ jobs:
           distribution: temurin
           java-version: 17
 
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
-
+      # ubuntu-latest ships the Android SDK (ANDROID_HOME). setup-android@v3 now fails
+      # trying to install the removed 'tools' package.
       - name: Install dependencies
         run: npm ci
 
