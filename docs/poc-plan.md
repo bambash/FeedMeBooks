@@ -15,7 +15,7 @@ on. One format at a time. Within-a-paragraph precision is the bar.
 |---|---|
 | Core moment | Handoff (Whispersync-style), not live read-along |
 | Precision | Within a paragraph |
-| Inputs | DRM-free EPUB + a folder of MP3s (track splits unrelated to chapters) |
+| Inputs | DRM-free EPUB + a folder of audio files: MP4/AAC (the user's actual files), also M4A/M4B/MP3 (track splits unrelated to chapters) |
 | Platform | Android phone, single device, no accounts or cloud |
 | Compute | On-device only |
 | Switch UX | Offer, then jump ("Resume where you were listening?") |
@@ -43,7 +43,7 @@ full-book transcription.
   EPUB (spine order, HTML stripped, whitespace collapsed). A text position is a
   `charOffset` into that string. Keep a per-spine-item offset table so offsets
   convert to and from Readium `Locator`s (href + progression + text snippet).
-- **Audio coordinate:** one global timeline `audioMs` across the ordered MP3
+- **Audio coordinate:** one global timeline `audioMs` across the ordered audio
   playlist (`sum(durations of earlier tracks) + position in current track`).
   Track boundaries are irrelevant to sync.
 - **Anchors:** `(charOffset, audioMs, source, createdAt)` pairs, sorted, with the
@@ -98,7 +98,7 @@ while the probe runs (target < 5s).
         Room (books, tracks, anchors, last positions)
 ```
 
-- **Import:** use the Storage Access Framework to pick an EPUB, then pick an MP3
+- **Import:** use the Storage Access Framework to pick an EPUB, then pick an audio
   folder (`OpenDocumentTree`). Sort tracks by natural filename order (user can
   reorder). Persist URI permissions rather than copying files. Read durations at import.
 - **Audio:** an ExoPlayer playlist inside a `MediaSessionService`, which gives
@@ -116,7 +116,7 @@ Spikes first, because each one kills the plan if it fails:
    **Done.** 20 JVM tests pass against a simulated audiobook. On a Galaxy S25
    Ultra (Android 16), a 55-word transcript against a 100k-word book takes
    24 ms whole-book and 8 ms windowed; indexing the book takes 0.5 s.
-2. **S2 — whisper.cpp on device.** Transcribe a 20s MP3 slice on a real Android
+2. **S2 — whisper.cpp on device.** Transcribe a 20s audio slice (MP4/AAC) on a real Android
    phone with token timestamps. Go/no-go: < 5s wall time with tiny.en.
    *Built into the POC APK ("Whisper speed" card); awaiting device numbers.*
 3. **S3 — Readium navigation.** Jump to an arbitrary text locator (mid-chapter)
@@ -130,7 +130,7 @@ Then:
 4. Library + import + ExoPlayer playlist with background/lockscreen controls.
 5. Audio → text handoff end to end.
 6. Text → audio handoff end to end.
-7. Test on real books: pick 2–3 DRM-free EPUB + MP3 pairs (e.g. Standard Ebooks +
+7. Test on real books: pick 2–3 DRM-free EPUB + audiobook pairs (e.g. Standard Ebooks +
    LibriVox recordings of the same public-domain edition) and record switch accuracy.
 
 ## Known risks

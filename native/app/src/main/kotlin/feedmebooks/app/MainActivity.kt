@@ -96,6 +96,12 @@ private fun SpikeCard(title: String, subtitle: String, content: @Composable () -
     }
 }
 
+/**
+ * MP4 audiobooks are often typed video/mp4 by the file provider, so audio/* alone hides them.
+ * MediaExtractor picks the audio track either way.
+ */
+private val AUDIOBOOK_TYPES = arrayOf("audio/*", "video/mp4")
+
 /** Spike S2: how fast is on-device Whisper on a 20 s slice of a real MP3? */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -123,7 +129,7 @@ private fun WhisperCard() {
         }
     }
 
-    SpikeCard("Whisper speed", "Transcribes 20 s of an MP3 on this phone. Target: under 5 s.") {
+    SpikeCard("Whisper speed", "Transcribes 20 s of an audiobook file (MP4/M4A/M4B/MP3) on this phone. Target: under 5 s.") {
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             WhisperModel.entries.forEach { m ->
                 FilterChip(selected = model == m, onClick = { model = m }, label = { Text("${m.label} (${m.approxMb} MB)") })
@@ -151,8 +157,8 @@ private fun WhisperCard() {
                 }
             }) { Text("Download ${model.label}") }
         }
-        OutlinedButton(onClick = { pickAudio.launch(arrayOf("audio/*")) }, enabled = !busy) {
-            Text(if (audio == null) "Pick an MP3" else "MP3: ${audio?.lastPathSegment?.substringAfterLast('/')} (${audioMs / 60_000} min)")
+        OutlinedButton(onClick = { pickAudio.launch(AUDIOBOOK_TYPES) }, enabled = !busy) {
+            Text(if (audio == null) "Pick an audiobook file" else "${audio?.lastPathSegment?.substringAfterLast('/')} (${audioMs / 60_000} min)")
         }
         OutlinedTextField(
             value = startSec,
