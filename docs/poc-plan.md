@@ -118,12 +118,16 @@ Spikes first, because each one kills the plan if it fails:
    24 ms whole-book and 8 ms windowed; indexing the book takes 0.5 s.
 2. **S2 — whisper.cpp on device.** Transcribe a 20s audio slice (MP4/AAC) on a real Android
    phone with token timestamps. Go/no-go: < 5s wall time with tiny.en.
-   *Built into the POC APK ("Whisper speed" card); awaiting device numbers.*
+   **Passed.** tiny.en, 4 threads, S25 Ultra: 20 s of a real MP4 audiobook in
+   0.62 s (32× realtime), decode 0.3 s, model load 0.13 s; transcript accurate
+   including proper nouns.
 3. **S3 — Readium navigation.** Jump to an arbitrary text locator (mid-chapter)
    and decorate a paragraph. Also read back the current visible locator → charOffset.
-   *Built into the POC APK ("Reader navigation" card, "Run 10" self-checks
-   each jump); awaiting device results.* Readium's content iterator gives each
-   paragraph its own locator, so text ↔ reader positions map exactly.
+   Readium's content iterator gives each paragraph its own locator, so text ↔
+   reader positions map exactly. **Partly passed:** on a real book Readium's
+   jumps landed one page early and its "first visible element" was a few
+   paragraphs off, so the app now checks the rendered page itself (PageProbe)
+   and turns pages until the target's first line is on screen.
 
 Then:
 
@@ -131,6 +135,9 @@ Then:
   timeline (`AudioTimeline` in `:core`: natural filename order, global ms ↔
   file + offset, decoding windows that straddle a file boundary). The reader
   screen plays the whole book and has "Read from here" / "Listen from here".
+  **First real run** (Oathbringer: 456k-word EPUB, 140 MP4 files, 55 h): both
+  directions matched on the first probe, 0.7–1.2 s per switch, text extracted
+  in 2.1 s, files ordered correctly.
 
 4. Library + import + ExoPlayer playlist with background/lockscreen controls.
 5. Audio → text handoff end to end.

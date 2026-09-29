@@ -53,7 +53,6 @@ import org.readium.r2.navigator.Decoration
 import org.readium.r2.navigator.epub.EpubNavigatorFactory
 import org.readium.r2.navigator.epub.EpubNavigatorFragment
 import org.readium.r2.shared.ExperimentalReadiumApi
-import org.readium.r2.shared.publication.Locator
 import kotlin.random.Random
 
 /**
@@ -199,17 +198,16 @@ class ReaderSpikeActivity : AppCompatActivity() {
         val prepared = prepareHandoff(list) ?: return "Download a Whisper model first (Whisper card)."
         val target = withContext(Dispatchers.Default) { prepared.handoff.audioToText(t, anchors(list)) }
         SpikeState.anchors = target.anchors
-        showParagraph(book.locatorOf(target.paragraph))
-        return "READ FROM HERE ${if (target.confident) "✓ matched" else "✗ no match, estimated"}\n" +
+        val turns = goToParagraph(target.paragraph)
+        return "READ FROM HERE ${if (target.confident) "✓ matched" else "✗ no match, estimated"}${describeTurns(turns)}\n" +
             "Audio: ${describeAudio(t)}\nBook: ${describeParagraph(target.paragraph)}\n${prepared.timings()}"
     }
 
     /** Text → audio: when does the narrator read the paragraph at the top of the screen? */
     private suspend fun listenFromHere(): String {
         val list = playlist ?: return "No audio loaded."
-        val locator = navigator.firstVisibleElementLocator() ?: return "Can't tell what's on screen."
-        val paragraph = book.paragraphOf(locator) ?: return "Visible text not found in the extracted book."
-        showParagraph(book.locatorOf(paragraph), move = false)
+        val paragraph = topOfScreen() ?: return "Can't tell what's on screen."
+        highlight(paragraph)
         status = "Finding this paragraph in the audio… ${describeParagraph(paragraph)}"
         val prepared = prepareHandoff(list) ?: return "Download a Whisper model first (Whisper card)."
         val target = withContext(Dispatchers.Default) { prepared.handoff.textToAudio(paragraph.charStart, anchors(list)) }
@@ -220,12 +218,52 @@ class ReaderSpikeActivity : AppCompatActivity() {
             "Book: ${describeParagraph(paragraph)}\nAudio: ${describeAudio(target.audioMs)}\n${prepared.timings()}"
     }
 
-    private suspend fun showParagraph(locator: Locator, move: Boolean = true) {
-        if (move) navigator.go(locator, animated = false)
+    // ---- Reader positioning -----------------------------------------------------------
+
+    private val probe get() = PageProbe(navigator)
+
+    private suspend fun highlight(paragraph: ParagraphRef) {
         navigator.applyDecorations(
-            listOf(Decoration("target", locator, Decoration.Style.Highlight(tint = HIGHLIGHT))),
+            listOf(Decoration("target", book.locatorOf(paragraph), Decoration.Style.Highlight(tint = HIGHLIGHT))),
             group = "handoff",
         )
+    }
+
+    /**
+     * Shows [paragraph] with its first line on screen. Readium's jump can land a page off,
+     * so check with the page and turn pages until it's there.
+     *
+     * @return pages turned to correct Readium's landing, or -1 if the page couldn't confirm it.
+     */
+    private suspend fun goToParagraph(paragraph: ParagraphRef): Int {
+        navigator.go(book.locatorOf(paragraph), animated = false)
+        highlight(paragraph)
+        delay(SETTLE_MS)
+        val prefix = book.compactPrefix(paragraph)
+        repeat(MAX_PAGE_TURNS + 1) { turns ->
+            when (probe.where(prefix)) {
+                PageProbe.Where.VISIBLE -> return turns
+                PageProbe.Where.AFTER -> navigator.goForward(animated = false)
+                PageProbe.Where.BEFORE -> navigator.goBackward(animated = false)
+                PageProbe.Where.MISSING -> return -1
+            }
+            delay(TURN_SETTLE_MS)
+        }
+        return -1
+    }
+
+    private fun describeTurns(turns: Int) = when {
+        turns < 0 -> " (couldn't confirm the paragraph is on screen)"
+        turns == 0 -> ""
+        else -> " (corrected Readium's landing by $turns page(s))"
+    }
+
+    /** The paragraph at the top of the screen, including one continued from the previous page. */
+    private suspend fun topOfScreen(): ParagraphRef? {
+        val href = navigator.currentLocator.value.href.toString()
+        probe.firstVisible()?.let { visible -> book.paragraphMatching(href, visible)?.let { return it } }
+        // Fall back to Readium's own answer if the page probe can't map it.
+        return navigator.firstVisibleElementLocator()?.let { book.paragraphOf(it) }
     }
 
     // ---- UI ---------------------------------------------------------------------------
@@ -287,51 +325,35 @@ class ReaderSpikeActivity : AppCompatActivity() {
         return (candidates.ifEmpty { book.text.paragraphs }).random(random)
     }
 
-    private class JumpResult(val target: ParagraphRef, val landed: ParagraphRef?)
-
-    private suspend fun jump(target: ParagraphRef): JumpResult {
-        showParagraph(book.locatorOf(target))
-        delay(SETTLE_MS)
-        val landed = navigator.firstVisibleElementLocator()?.let { book.paragraphOf(it) }
-        return JumpResult(target, landed)
-    }
-
-    /** How many paragraphs before the target the screen starts (0 = target is first on screen). */
-    private fun JumpResult.offset(): Int? {
-        val landedAt = landed ?: return null
-        return book.text.paragraphs.indexOf(target) - book.text.paragraphs.indexOf(landedAt)
-    }
-
-    private fun verdict(result: JumpResult): String = when (val offset = result.offset()) {
-        null -> "couldn't read back the visible element"
-        0 -> "target is the first paragraph on screen ✓"
-        in 1..3 -> "screen starts $offset paragraph(s) above the target (same screen) ✓"
-        else -> "landed $offset paragraphs away ✗"
-    }
-
     private suspend fun jumpMany(n: Int): String {
-        val offsets = (1..n).map {
-            val result = jump(randomParagraph())
-            status = "Jump $it/$n: ${verdict(result)}"
-            result.offset()
+        val results = (1..n).map {
+            val turns = goToParagraph(randomParagraph())
+            status = "Jump $it/$n:${describeTurns(turns).ifEmpty { " landed directly ✓" }}"
+            turns
         }
-        val exact = offsets.count { it == 0 }
-        val sameScreen = offsets.count { it != null && it in 1..3 }
-        val missed = offsets.count { it == null || it !in 0..3 }
-        return "NAV TEST: $n jumps: $exact exact, $sameScreen same screen, $missed missed " +
-            "(${book.text.paragraphs.size} paragraphs, ${book.text.words.size} words, text extracted in ${book.extractMs} ms)"
+        val direct = results.count { it == 0 }
+        val corrected = results.filter { it > 0 }
+        val failed = results.count { it < 0 }
+        return "NAV TEST: $n jumps: $direct landed directly, ${corrected.size} needed page turns " +
+            "(${corrected.joinToString()}), $failed unconfirmed " +
+            "(${book.text.paragraphs.size} paragraphs, ${book.text.words.size} words)"
     }
 
+    /** Compares our page probe with Readium's own "first visible element". */
     private suspend fun whereAmI(): String {
-        val locator = navigator.firstVisibleElementLocator() ?: return "No visible element reported"
-        val paragraph = book.paragraphOf(locator) ?: return "Visible element not found in extracted text: ${locator.href}"
-        val percent = 100.0 * paragraph.charStart / book.text.length
-        return "charOffset ${paragraph.charStart} (${"%.1f".format(percent)}% of book), ${describeParagraph(paragraph)}"
+        val ours = topOfScreen()
+        val readium = navigator.firstVisibleElementLocator()?.let { book.paragraphOf(it) }
+        fun line(p: ParagraphRef?) = p?.let {
+            "${describeParagraph(it)} (${"%.1f".format(100.0 * it.charStart / book.text.length)}% of book)"
+        } ?: "not found"
+        return "Top of screen: ${line(ours)}\nReadium says: ${line(readium)}"
     }
 
     private companion object {
         const val NAVIGATOR_TAG = "navigator"
-        const val SETTLE_MS = 1_200L
+        const val SETTLE_MS = 400L
+        const val TURN_SETTLE_MS = 250L
+        const val MAX_PAGE_TURNS = 4
         const val HIGHLIGHT = 0xFFFFC107.toInt()
         /** Start listening slightly before the paragraph so the first words aren't clipped. */
         const val LEAD_IN_MS = 2_000L

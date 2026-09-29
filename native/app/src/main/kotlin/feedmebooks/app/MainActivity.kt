@@ -209,6 +209,9 @@ private fun HandoffCard() {
     var bookInfo by remember { mutableStateOf(SpikeState.book?.let(::describeBook) ?: "") }
     var audioInfo by remember { mutableStateOf(SpikeState.playlist?.let(::describePlaylist) ?: "") }
     var busy by remember { mutableStateOf(false) }
+    // Compose state mirrors of SpikeState, so the buttons update after a pick.
+    var hasBook by remember { mutableStateOf(SpikeState.book != null) }
+    var hasAudio by remember { mutableStateOf(SpikeState.playlist != null) }
 
     val pickEpub = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri == null) return@rememberLauncherForActivityResult
@@ -217,6 +220,7 @@ private fun HandoffCard() {
             bookInfo = try {
                 val book = withContext(Dispatchers.IO) { LoadedBook.open(context, uri) { bookInfo = it } }
                 SpikeState.book = book
+                hasBook = true
                 describeBook(book)
             } catch (e: Throwable) {
                 "Failed: $e"
@@ -231,6 +235,7 @@ private fun HandoffCard() {
             audioInfo = try {
                 val playlist = withContext(Dispatchers.IO) { Playlist.fromFolder(context, uri) { audioInfo = it } }
                 SpikeState.playlist = playlist
+                hasAudio = true
                 describePlaylist(playlist)
             } catch (e: Throwable) {
                 "Failed: $e"
@@ -250,8 +255,8 @@ private fun HandoffCard() {
         if (audioInfo.isNotEmpty()) Text(audioInfo, style = MaterialTheme.typography.bodySmall)
         Button(
             onClick = { context.startActivity(Intent(context, ReaderSpikeActivity::class.java)) },
-            enabled = !busy && SpikeState.book != null,
-        ) { Text(if (SpikeState.playlist == null) "3. Open reader (no audio)" else "3. Open reader + player") }
+            enabled = !busy && hasBook,
+        ) { Text(if (hasAudio) "3. Open reader + player" else "3. Open reader (no audio)") }
     }
 }
 
@@ -277,7 +282,7 @@ private fun MatcherCard() {
             busy = false
         }
     }
-    SpikeCard("Matcher", "Measured on an S25 Ultra: 24 ms whole-book, 8 ms windowed.") {
+    SpikeCard("Matcher", "S25 Ultra: 24 ms whole-book, 8 ms windowed (100k-word book).") {
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             OutlinedButton(onClick = { run(::matcherSmokeTest) }, enabled = !busy) { Text("Smoke test") }
             OutlinedButton(onClick = { run(::matcherBenchmark) }, enabled = !busy) { Text("Speed") }

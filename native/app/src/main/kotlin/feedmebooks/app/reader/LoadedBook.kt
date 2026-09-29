@@ -49,7 +49,29 @@ class LoadedBook(
 
     private val sectionHrefs: List<String> = locators.map { it.firstOrNull()?.href?.toString() ?: "" }
 
+    /** The paragraph's opening text without whitespace, as the page probe compares it. */
+    fun compactPrefix(paragraph: ParagraphRef, length: Int = PREFIX_LENGTH): String =
+        PageProbe.compact(text.text.substring(paragraph.charStart, paragraph.charEnd)).take(length)
+
+    /**
+     * Maps what the page probe saw to a paragraph. Repeated short paragraphs ("Yes.") are
+     * disambiguated by their relative position within the resource.
+     */
+    fun paragraphMatching(href: String, visible: PageProbe.Visible): ParagraphRef? {
+        val section = sectionHrefs.indexOf(href)
+        if (section < 0) return null
+        val inSection = text.paragraphs.filter { it.sectionIndex == section }
+        val key = visible.compactText.take(PREFIX_LENGTH)
+        val relative = visible.ordinal.toDouble() / visible.total.coerceAtLeast(1)
+        return inSection.withIndex()
+            .filter { (_, p) -> compactPrefix(p).let { c -> c.startsWith(key) || key.startsWith(c) } }
+            .minByOrNull { (i, _) -> kotlin.math.abs(i.toDouble() / inSection.size - relative) }
+            ?.value
+    }
+
     companion object {
+        private const val PREFIX_LENGTH = 40
+
         @OptIn(ExperimentalReadiumApi::class)
         suspend fun open(context: Context, uri: Uri, onProgress: (String) -> Unit): LoadedBook {
             onProgress("Copying file…")
