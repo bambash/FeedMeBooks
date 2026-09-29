@@ -97,7 +97,7 @@ private fun SpikeCard(title: String, subtitle: String, content: @Composable () -
 }
 
 /**
- * MP4 audiobooks are often typed video/mp4 by the file provider, so audio/* alone hides them.
+ * MP4 audiobooks are often typed video/mp4 by the file provider, so an audio-only filter hides them.
  * MediaExtractor picks the audio track either way.
  */
 private val AUDIOBOOK_TYPES = arrayOf("audio/*", "video/mp4")
