@@ -51,6 +51,12 @@ android {
         }
     }
 
+    lint {
+        // lifecycle 2.9's bundled lint checks crash AGP 8.7's lint during the release
+        // "lint vital" gate. Lint still runs on demand (./gradlew :app:lint).
+        checkReleaseBuilds = false
+    }
+
     buildFeatures {
         compose = true
         buildConfig = true
