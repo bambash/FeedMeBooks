@@ -76,4 +76,19 @@ class NarratorTrackerTest {
         tracker.reset()
         assertTrue(tracker.needsProbe(205_000))
     }
+
+    @Test
+    fun `a probe that fails is not retried before the retry interval`() {
+        val tracker = NarratorTracker(TrackerConfig(retryIntervalMs = 8_000))
+        assertTrue(tracker.needsProbe(50_000))
+        tracker.failed(50_000)
+        assertFalse(tracker.needsProbe(50_500))
+        assertFalse(tracker.needsProbe(57_000))
+        assertTrue(tracker.needsProbe(58_500))
+        // A later success clears the hold and the fix is used as usual.
+        val paragraph = book.paragraphs[3]
+        tracker.fixed(TextTarget(paragraph.charStart, paragraph, confident = true, sim.freshAnchors(), audioMs = 60_000, charsPerMs = 0.02))
+        assertFalse(tracker.needsProbe(61_000))
+        assertEquals(paragraph.charStart + 20, tracker.estimate(61_000))
+    }
 }

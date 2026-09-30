@@ -96,7 +96,8 @@ class PlaybackService : MediaSessionService() {
     /** Sets or clears the timer and tells controllers through the session extras. */
     private fun setSleepAt(at: Long?) {
         sleepAt = at
-        if (at == null) session?.player?.volume = 1f
+        // Any change undoes a fade in progress; the next tick fades again if the new deadline is close.
+        session?.player?.volume = 1f
         session?.setSessionExtras(Bundle().apply { putLong(EXTRA_SLEEP_AT, at ?: 0L) })
     }
 

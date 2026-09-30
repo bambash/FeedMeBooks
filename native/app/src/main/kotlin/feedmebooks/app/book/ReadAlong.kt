@@ -60,7 +60,9 @@ class ReadAlong(
         lastAudioMs = audioMs
         if (tracker.needsProbe(audioMs) && probe == null && engine.ready) {
             probe = scope.launch {
-                runCatching { engine.audioToText(audioMs) {} }.onSuccess { tracker.fixed(it) }
+                runCatching { engine.audioToText(audioMs) {} }
+                    .onSuccess { tracker.fixed(it) }
+                    .onFailure { tracker.failed(audioMs) } // spaced out, not every tick
                 probe = null
             }
         }
