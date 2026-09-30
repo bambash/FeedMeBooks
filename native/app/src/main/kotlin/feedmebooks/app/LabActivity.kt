@@ -8,7 +8,6 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -28,8 +27,6 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.darkColorScheme
-import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -47,6 +44,7 @@ import feedmebooks.app.reader.ReaderSpikeActivity
 import feedmebooks.app.whisper.AudioDecoder
 import feedmebooks.app.whisper.ModelStore
 import feedmebooks.app.whisper.WhisperModel
+import feedmebooks.app.ui.AppTheme
 import feedmebooks.core.BookText
 import feedmebooks.core.Matcher
 import feedmebooks.core.Section
@@ -62,7 +60,7 @@ class LabActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContent {
-            MaterialTheme(colorScheme = if (isSystemInDarkTheme()) darkColorScheme() else lightColorScheme()) {
+            AppTheme {
                 Surface(Modifier.fillMaxSize()) { SpikeScreen() }
             }
         }

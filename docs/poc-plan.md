@@ -152,6 +152,17 @@ Then:
 7. Test on real books: pick 2–3 DRM-free EPUB + audiobook pairs (e.g. Standard Ebooks +
    LibriVox recordings of the same public-domain edition) and record switch accuracy.
 
+### After v1: read-along and polish
+
+The handoff machinery turned out to be enough for live read-along too, so the "no live
+read-along" decision above was relaxed once v1 worked: while the audio plays, the reader
+probes the last 20 s of audio every 30 s (one Whisper call, well under a second), carries
+the position forward at the local narration rate in between, highlights the sentence being
+read and turns the page when it goes off screen. In simulation this stays within a sentence
+for 100% of ticks with 10 probes per 5 minutes. Every probe also adds anchors, so it makes
+the handoffs sharper as a side effect. Reader theming (light, sepia, dark), text size, a
+scrolled layout, a table of contents and a sleep timer came in at the same time.
+
 ## Known risks
 
 - **Narration differs from text** (intros, credits, footnotes not read, front

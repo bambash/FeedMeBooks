@@ -3,9 +3,11 @@ package feedmebooks.app.playback
 import android.content.ComponentName
 import android.content.Context
 import android.net.Uri
+import android.os.Bundle
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
 import androidx.media3.session.MediaController
+import androidx.media3.session.SessionCommand
 import androidx.media3.session.SessionToken
 import feedmebooks.app.library.BookRecord
 import feedmebooks.app.library.BookStore
@@ -36,6 +38,16 @@ class PlayerLink private constructor(val controller: MediaController, private va
     var speed: Float
         get() = controller.playbackParameters.speed
         set(value) = controller.setPlaybackSpeed(value)
+
+    /** Wall-clock time the sleep timer will pause playback, if one is set. */
+    val sleepAt: Long?
+        get() = controller.sessionExtras.getLong(PlaybackService.EXTRA_SLEEP_AT, 0L).takeIf { it > 0 }
+
+    /** Pause by itself in [ms] from now; null turns the timer off. */
+    fun sleepIn(ms: Long?) {
+        val args = Bundle().apply { putLong(PlaybackService.EXTRA_SLEEP_AT, ms?.let { System.currentTimeMillis() + it } ?: 0L) }
+        controller.sendCustomCommand(SessionCommand(PlaybackService.COMMAND_SLEEP, Bundle.EMPTY), args)
+    }
 
     private fun isThisBook() = PlaybackIds.parse(controller.currentMediaItem?.mediaId)?.first == bookId
 
