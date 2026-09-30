@@ -7,7 +7,6 @@ import android.view.ViewGroup.LayoutParams.MATCH_PARENT
 import android.view.ViewGroup.LayoutParams.WRAP_CONTENT
 import android.widget.LinearLayout
 import androidx.appcompat.app.AppCompatActivity
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -15,6 +14,9 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.List
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -25,13 +27,12 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.darkColorScheme
-import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -42,10 +43,13 @@ import androidx.compose.ui.platform.ComposeView
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.view.ViewCompat
+import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.fragment.app.FragmentContainerView
 import androidx.fragment.app.commitNow
+import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.repeatOnLifecycle
 import feedmebooks.app.R
 import feedmebooks.app.audio.formatDuration
 import feedmebooks.app.library.BookRecord
@@ -53,14 +57,26 @@ import feedmebooks.app.library.BookStore
 import feedmebooks.app.playback.PlayerLink
 import feedmebooks.app.reader.LoadedBook
 import feedmebooks.app.reader.PageProbe
+import feedmebooks.app.reader.PageScroller
+import feedmebooks.app.reader.ReaderPrefs
+import feedmebooks.app.reader.ReaderSettings
+import feedmebooks.app.reader.isSystemDark
+import feedmebooks.app.ui.AppTheme
+import feedmebooks.app.ui.ReaderSettingsSheet
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.drop
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import org.json.JSONObject
 import org.readium.r2.navigator.Decoration
 import org.readium.r2.navigator.epub.EpubNavigatorFactory
 import org.readium.r2.navigator.epub.EpubNavigatorFragment
+import org.readium.r2.navigator.input.InputListener
+import org.readium.r2.navigator.input.TapEvent
 import org.readium.r2.shared.ExperimentalReadiumApi
 import org.readium.r2.shared.publication.Locator
+import kotlin.math.roundToInt
 
 /**
  * Reading and listening to one book. The reader fills the screen; the audiobook plays in
@@ -68,23 +84,43 @@ import org.readium.r2.shared.publication.Locator
  *
  * Handoff is offered rather than forced: when you come back to the book after listening, it
  * offers to jump to where the narrator is; when you press play after reading, it offers to
- * start the audio from the page you're on.
+ * start the audio from the page you're on. While the audio plays, [ReadAlong] highlights the
+ * sentence being read and keeps it on screen (unless turned off in the settings).
+ *
+ * In the scrolled layout, sideways swipes don't change chapters (Readium's own rule fired on
+ * almost any flick); the page edges and a "Next chapter" chip do, and an auto-scroll with a
+ * speed dial rolls through the book by itself.
  */
 @OptIn(ExperimentalReadiumApi::class)
 class BookActivity : AppCompatActivity() {
 
     private lateinit var opened: OpenBooks.OpenBook
     private lateinit var bookId: String
+    private lateinit var root: LinearLayout
     private val navigator get() = supportFragmentManager.findFragmentByTag(NAVIGATOR_TAG) as EpubNavigatorFragment
     private val record: BookRecord? get() = BookStore.get(bookId)
+    private val contents: List<TocEntry> by lazy { opened.publication.tocEntries() }
 
     private var link by mutableStateOf<PlayerLink?>(null)
     private var engine: HandoffEngine? = null
+    private var readAlong by mutableStateOf<ReadAlong?>(null)
     private var banner by mutableStateOf<Banner?>(null)
     private var isPlaying by mutableStateOf(false)
     private var speed by mutableStateOf(1f)
+    private var positionText by mutableStateOf("")
+    private var sleepLeftMs by mutableStateOf<Long?>(null)
+    private var location by mutableStateOf<Locator?>(null)
+    /** Tapping the middle of the page hides the bar for distraction-free reading. */
+    private var barVisible by mutableStateOf(true)
+    private var sheet by mutableStateOf<Sheet?>(null)
+    /** Scroll mode: the resource is scrolled to its end, so offer the next chapter. */
+    private var atChapterEnd by mutableStateOf(false)
+    private var autoScrolling by mutableStateOf(false)
+    private var autoScrollJob: Job? = null
 
-    /** Page changes before this time are ours (jumps, initial layout), not the reader turning pages. */
+    private enum class Sheet { SETTINGS, CONTENTS, SLEEP }
+
+    /** Page changes before this time are ours (jumps, initial layout, following the narrator), not the reader turning pages. */
     private var programmaticUntil = 0L
     private var highlighted = false
 
@@ -97,6 +133,7 @@ class BookActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         bookId = intent.getStringExtra(EXTRA_BOOK_ID).orEmpty()
+        ReaderSettings.init(this)
         val current = OpenBooks.current?.takeIf { it.bookId == bookId }
         val book = BookStore.get(bookId)
         if (current == null || book == null) {
@@ -107,17 +144,23 @@ class BookActivity : AppCompatActivity() {
         }
         opened = current
         val initial = book.readingLocator?.let { runCatching { Locator.fromJSON(JSONObject(it)) }.getOrNull() }
-        supportFragmentManager.fragmentFactory =
-            EpubNavigatorFactory(opened.publication).createFragmentFactory(initialLocator = initial)
+        val prefs = ReaderSettings.prefs.value
+        supportFragmentManager.fragmentFactory = EpubNavigatorFactory(opened.publication)
+            .createFragmentFactory(
+                initialLocator = initial,
+                initialPreferences = prefs.epubPreferences(isSystemDark()),
+                // Otherwise, in scroll mode, any flick with a sideways component jumps a whole chapter.
+                configuration = EpubNavigatorFragment.Configuration(disablePageTurnsWhileScrolling = true),
+            )
         super.onCreate(savedInstanceState)
 
-        val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         root.addView(
             FragmentContainerView(this).apply { id = R.id.navigator_container },
             LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f),
         )
         root.addView(
-            ComposeView(this).apply { setContent { BottomBar() } },
+            ComposeView(this).apply { setContent { AppTheme { BottomBar() } } },
             LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT),
         )
         ViewCompat.setOnApplyWindowInsetsListener(root) { view, insets ->
@@ -126,6 +169,7 @@ class BookActivity : AppCompatActivity() {
             insets
         }
         setContentView(root)
+        applyTheme(prefs)
         if (savedInstanceState == null) {
             supportFragmentManager.commitNow {
                 add(R.id.navigator_container, EpubNavigatorFragment::class.java, Bundle(), NAVIGATOR_TAG)
@@ -133,7 +177,24 @@ class BookActivity : AppCompatActivity() {
         }
 
         programmaticUntil = System.currentTimeMillis() + INITIAL_LAYOUT_MS
+        navigator.addInputListener(tapZones)
         lifecycleScope.launch { navigator.currentLocator.collect { onLocatorChanged(it) } }
+        lifecycleScope.launch {
+            // Settings changed from the sheet: restyle the page and the window right away.
+            ReaderSettings.prefs.drop(1).collect { p ->
+                navigator.submitPreferences(p.epubPreferences(isSystemDark()))
+                applyTheme(p)
+                if (!p.scroll && autoScrolling) setAutoScroll(false)
+            }
+        }
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                while (true) {
+                    poll()
+                    delay(TICK_MS)
+                }
+            }
+        }
 
         if (book.hasAudio) {
             lifecycleScope.launch {
@@ -141,7 +202,17 @@ class BookActivity : AppCompatActivity() {
                 link = connected
                 speed = connected.speed
                 val text = opened.text.await()
-                engine = HandoffEngine(this@BookActivity, bookId, text, book.playlist())
+                val eng = HandoffEngine(this@BookActivity, bookId, text, book.playlist())
+                engine = eng
+                readAlong = ReadAlong(
+                    scope = lifecycleScope,
+                    text = text,
+                    engine = eng,
+                    navigator = { navigator },
+                    onShow = { highlight(text, it) },
+                    onJump = { goTo(text, it) },
+                    beforeMoving = { programmaticUntil = System.currentTimeMillis() + JUMP_SETTLE_MS },
+                )
                 offerReadingIfListenedMore()
             }
         }
@@ -153,14 +224,125 @@ class BookActivity : AppCompatActivity() {
         if (engine != null) lifecycleScope.launch { offerReadingIfListenedMore() }
     }
 
+    override fun onStop() {
+        if (autoScrolling) setAutoScroll(false)
+        super.onStop()
+    }
+
     override fun onDestroy() {
         link?.release()
         super.onDestroy()
     }
 
+    /** The window and the strip around the reader match the page colour, so nothing flashes white. */
+    private fun applyTheme(prefs: ReaderPrefs) {
+        val systemDark = isSystemDark()
+        val background = prefs.readiumTheme(systemDark).backgroundColor
+        root.setBackgroundColor(background)
+        window.decorView.setBackgroundColor(background)
+        WindowCompat.getInsetsController(window, root).isAppearanceLightStatusBars = !prefs.isDark(systemDark)
+    }
+
+    /** Every half second while on screen: the player's state, and the narrator's position if following. */
+    private suspend fun poll() {
+        val scrolled = navigator.settings.value.scroll
+        atChapterEnd = scrolled && !autoScrolling &&
+            PageScroller(navigator).atEdge().let { it == PageScroller.Edge.BOTTOM || it == PageScroller.Edge.BOTH }
+        val player = link ?: return
+        val position = player.position()
+        isPlaying = player.isPlaying
+        positionText = describe(position)
+        sleepLeftMs = player.sleepAt?.let { (it - System.currentTimeMillis()).coerceAtLeast(0) }
+        val follow = readAlong ?: return
+        if (isPlaying && ReaderSettings.prefs.value.followNarrator) follow.tick(position)
+    }
+
+    /** Tap the edges to turn pages, the middle to show or hide the bar. */
+    private val tapZones = object : InputListener {
+        override fun onTap(event: TapEvent): Boolean {
+            val width = navigator.view?.width?.takeIf { it > 0 } ?: return false
+            when {
+                event.point.x < width * TAP_EDGE -> pageBackward()
+                event.point.x > width * (1 - TAP_EDGE) -> pageForward()
+                else -> barVisible = !barVisible
+            }
+            return true
+        }
+    }
+
+    // ---- Moving through the book ----------------------------------------------------------
+
+    /** A page forward: the next column, or in scroll mode a screenful down (then the next chapter). */
+    private fun pageForward() {
+        if (!navigator.settings.value.scroll) {
+            navigator.goForward(animated = true)
+            return
+        }
+        lifecycleScope.launch { if (!PageScroller(navigator).scrollBy(SCREENFUL)) nextChapter() }
+    }
+
+    private fun pageBackward() {
+        if (!navigator.settings.value.scroll) {
+            navigator.goBackward(animated = true)
+            return
+        }
+        lifecycleScope.launch { if (!PageScroller(navigator).scrollBy(-SCREENFUL)) previousChapter() }
+    }
+
+    private fun resourceIndex(): Int {
+        val href = navigator.currentLocator.value.href.toString().substringBefore('#')
+        return opened.publication.readingOrder.indexOfFirst { it.href.toString().substringBefore('#') == href }
+    }
+
+    /** Opens the start of the next resource in the reading order; false at the end of the book. */
+    private fun nextChapter(): Boolean {
+        val index = resourceIndex()
+        if (index < 0) return false
+        val next = opened.publication.readingOrder.getOrNull(index + 1) ?: return false
+        return navigator.go(next, animated = false)
+    }
+
+    /** Opens the end of the previous resource; false at the start of the book. */
+    private fun previousChapter(): Boolean {
+        val index = resourceIndex()
+        if (index <= 0) return false
+        val previous = opened.publication.readingOrder[index - 1]
+        val end = opened.publication.locatorFromLink(previous)?.copyWithLocations(progression = 1.0) ?: return false
+        return navigator.go(end, animated = false)
+    }
+
+    /**
+     * Auto-scroll: the page rolls down at the speed on the dial, continuing into the next
+     * chapter, until the end of the book, the layout changes, or the screen is left.
+     */
+    private fun setAutoScroll(on: Boolean) {
+        autoScrolling = on
+        autoScrollJob?.cancel()
+        autoScrollJob = null
+        if (!on) {
+            lifecycleScope.launch { runCatching { PageScroller(navigator).autoScroll(0.0) } }
+            return
+        }
+        autoScrollJob = lifecycleScope.launch {
+            val scroller = PageScroller(navigator)
+            while (isActive) {
+                val more = scroller.autoScroll(ReaderSettings.prefs.value.autoScrollPxPerSecond)
+                if (!more) {
+                    if (!nextChapter()) {
+                        setAutoScroll(false)
+                        return@launch
+                    }
+                    delay(CHAPTER_LOAD_MS)
+                }
+                delay(AUTO_SCROLL_TICK_MS)
+            }
+        }
+    }
+
     // ---- Reading position ------------------------------------------------------------
 
     private fun onLocatorChanged(locator: Locator) {
+        location = locator
         val userTurn = System.currentTimeMillis() > programmaticUntil
         BookStore.update(bookId) {
             it.copy(
@@ -169,9 +351,13 @@ class BookActivity : AppCompatActivity() {
                 readAt = if (userTurn) System.currentTimeMillis() else it.readAt,
             )
         }
-        if (userTurn && highlighted) {
-            highlighted = false
-            lifecycleScope.launch { navigator.applyDecorations(emptyList(), HIGHLIGHT_GROUP) }
+        if (userTurn) {
+            if (highlighted) {
+                highlighted = false
+                lifecycleScope.launch { navigator.applyDecorations(emptyList(), HIGHLIGHT_GROUP) }
+            }
+            // Turning pages while the narrator reads means looking around: stop moving the page until asked.
+            if (isPlaying) readAlong?.hold()
         }
     }
 
@@ -194,23 +380,34 @@ class BookActivity : AppCompatActivity() {
         val probe = PageProbe(navigator)
         val prefix = text.compactPrefix(paragraph)
         val at = text.compactOffsetOf(charOffset)
+        val scrolled = navigator.settings.value.scroll
         repeat(MAX_PAGE_TURNS) {
             programmaticUntil = System.currentTimeMillis() + JUMP_SETTLE_MS
-            when (probe.where(prefix, at)) {
-                PageProbe.Where.AFTER -> navigator.goForward(animated = false)
-                PageProbe.Where.BEFORE -> navigator.goBackward(animated = false)
-                else -> return
+            val where = probe.where(prefix, at)
+            if (where != PageProbe.Where.AFTER && where != PageProbe.Where.BEFORE) return
+            if (scrolled) {
+                // One smooth scroll lands it; the loop is for column layouts.
+                probe.scrollTo(prefix, at)
+                return
             }
+            if (where == PageProbe.Where.AFTER) navigator.goForward(animated = false) else navigator.goBackward(animated = false)
             delay(TURN_SETTLE_MS)
         }
     }
 
     private suspend fun highlight(text: LoadedBook, charOffset: Int) {
         val paragraph = text.text.paragraphAt(charOffset)
+        val dark = ReaderSettings.prefs.value.isDark(isSystemDark())
         navigator.applyDecorations(
             listOf(
-                Decoration("paragraph", text.locatorOf(paragraph), Decoration.Style.Highlight(tint = PARAGRAPH_TINT)),
-                Decoration("sentence", text.sentenceLocator(charOffset), Decoration.Style.Highlight(tint = SENTENCE_TINT)),
+                Decoration(
+                    "paragraph", text.locatorOf(paragraph),
+                    Decoration.Style.Highlight(tint = if (dark) PARAGRAPH_TINT_DARK else PARAGRAPH_TINT),
+                ),
+                Decoration(
+                    "sentence", text.sentenceLocator(charOffset),
+                    Decoration.Style.Highlight(tint = if (dark) SENTENCE_TINT_DARK else SENTENCE_TINT),
+                ),
             ),
             HIGHLIGHT_GROUP,
         )
@@ -244,6 +441,7 @@ class BookActivity : AppCompatActivity() {
         val jump = {
             banner = null
             markSynced()
+            readAlong?.resume()
             lifecycleScope.launch { goTo(text, target.charOffset) }
             Unit
         }
@@ -262,6 +460,14 @@ class BookActivity : AppCompatActivity() {
         )
     }
 
+    /** Back to the narrator after the reader wandered off while the audio played. */
+    private fun backToNarrator() {
+        val follow = readAlong ?: return
+        follow.resume()
+        val at = follow.position ?: return
+        lifecycleScope.launch { goTo(opened.text.await(), at) }
+    }
+
     // ---- Handoff: text → audio ----------------------------------------------------------
 
     private fun onPlayPressed() {
@@ -270,6 +476,7 @@ class BookActivity : AppCompatActivity() {
             player.pause()
             return
         }
+        readAlong?.resume()
         val book = record ?: return
         if (!book.readingIsFresher || engine == null) {
             player.play()
@@ -295,6 +502,7 @@ class BookActivity : AppCompatActivity() {
         val target = runCatching { eng.textToAudio(charOffset) { banner = Banner.Working(it) } }
             .getOrElse { banner = Banner.Info("Couldn't find this page in the audio: ${it.message}"); return }
         player.seekTo(maxOf(0, target.audioMs - LEAD_IN_MS))
+        readAlong?.resume()
         player.play()
         markSynced()
         banner = if (target.confident) null else Banner.Info("Started near this page (couldn't pin it down exactly).")
@@ -304,54 +512,129 @@ class BookActivity : AppCompatActivity() {
 
     @Composable
     private fun BottomBar() {
-        var position by remember { mutableStateOf("") }
+        val prefs by ReaderSettings.prefs.collectAsState()
         var menu by remember { mutableStateOf(false) }
-        LaunchedEffect(link) {
-            while (true) {
-                link?.let {
-                    position = describe(it.position())
-                    isPlaying = it.isPlaying
-                }
-                delay(500)
-            }
+        val book = record
+        val player = link
+        val follow = readAlong
+
+        when (sheet) {
+            Sheet.SETTINGS -> ReaderSettingsSheet(showFollow = book?.hasAudio == true) { sheet = null }
+            Sheet.CONTENTS -> ContentsSheet(
+                entries = contents,
+                current = location,
+                onPick = { entry ->
+                    sheet = null
+                    navigator.go(entry.link, animated = false)
+                },
+                onDismiss = { sheet = null },
+            )
+            Sheet.SLEEP -> SleepTimerDialog(
+                remainingMs = sleepLeftMs,
+                onPick = { minutes ->
+                    sheet = null
+                    player?.sleepIn(minutes?.let { it * 60_000L })
+                },
+                onDismiss = { sheet = null },
+            )
+            null -> {}
         }
-        MaterialTheme(colorScheme = if (isSystemInDarkTheme()) darkColorScheme() else lightColorScheme()) {
-            Surface(tonalElevation = 3.dp) {
-                Column(Modifier.padding(horizontal = 12.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    banner?.let { BannerCard(it) }
-                    val book = record
-                    if (book?.hasAudio != true) {
-                        Text("No audiobook for this book yet. Add its folder from the library.", style = MaterialTheme.typography.bodySmall)
-                        return@Column
+
+        Surface(tonalElevation = 3.dp) {
+            Column(Modifier.padding(horizontal = 12.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                banner?.let { BannerCard(it) }
+                if (!barVisible) return@Column
+
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            contents.entryFor(location)?.title ?: book?.title.orEmpty(),
+                            style = MaterialTheme.typography.labelMedium, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                        )
+                        location?.locations?.totalProgression?.let {
+                            Text("${(it * 100).toInt()}% read", style = MaterialTheme.typography.labelSmall)
+                        }
                     }
-                    val player = link
-                    if (player == null) {
-                        Text("Connecting to the player…", style = MaterialTheme.typography.bodySmall)
-                        return@Column
+                    if (atChapterEnd && !autoScrolling) {
+                        FilledTonalButton(onClick = { nextChapter() }) {
+                            Text("Next chapter")
+                            Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = null)
+                        }
                     }
-                    Text(position, style = MaterialTheme.typography.labelSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(2.dp)) {
-                        TextButton(onClick = { player.seekTo(maxOf(0, player.position() - 30_000)) }) { Text("−30") }
-                        Button(onClick = ::onPlayPressed) { Text(if (isPlaying) "Pause" else "Play") }
-                        TextButton(onClick = { player.seekTo(player.position() + 30_000) }) { Text("+30") }
-                        TextButton(onClick = {
-                            val next = SPEEDS.firstOrNull { it > speed + 0.01f } ?: SPEEDS.first()
-                            player.speed = next
-                            speed = next
-                        }) { Text("${"%.2f".format(speed).trimEnd('0').trimEnd('.')}×") }
-                        Box {
-                            IconButton(onClick = { menu = true }) { Icon(Icons.Filled.MoreVert, contentDescription = "More") }
-                            DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
-                                DropdownMenuItem(text = { Text("Go to the narrator's position") }, onClick = {
+                    if (prefs.scroll) {
+                        TextButton(onClick = { setAutoScroll(!autoScrolling) }) { Text(if (autoScrolling) "Stop" else "Auto") }
+                    }
+                    IconButton(onClick = { sheet = Sheet.CONTENTS }) { Icon(Icons.AutoMirrored.Filled.List, contentDescription = "Contents") }
+                    TextButton(onClick = { sheet = Sheet.SETTINGS }) { Text("Aa") }
+                }
+                if (autoScrolling) {
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text("Speed", style = MaterialTheme.typography.labelMedium)
+                        Slider(
+                            value = prefs.autoScrollSpeed.toFloat(),
+                            onValueChange = { v -> ReaderSettings.update { it.copy(autoScrollSpeed = v.roundToInt()) } },
+                            valueRange = ReaderPrefs.AUTO_SCROLL_MIN.toFloat()..ReaderPrefs.AUTO_SCROLL_MAX.toFloat(),
+                            steps = ReaderPrefs.AUTO_SCROLL_MAX - ReaderPrefs.AUTO_SCROLL_MIN - 1,
+                            modifier = Modifier.weight(1f),
+                        )
+                        Text("${prefs.autoScrollSpeed}", style = MaterialTheme.typography.labelMedium)
+                    }
+                }
+
+                if (book?.hasAudio != true) {
+                    Text("No audiobook for this book yet. Add its folder from the library.", style = MaterialTheme.typography.bodySmall)
+                    return@Column
+                }
+                if (player == null) {
+                    Text("Connecting to the player…", style = MaterialTheme.typography.bodySmall)
+                    return@Column
+                }
+                if (follow?.held == true && isPlaying && prefs.followNarrator) {
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text("The narrator has moved on.", style = MaterialTheme.typography.bodySmall, modifier = Modifier.weight(1f))
+                        FilledTonalButton(onClick = ::backToNarrator) { Text("Back to the narrator") }
+                    }
+                }
+                Text(
+                    positionText + (sleepLeftMs?.let { " · sleep in ${formatDuration(it)}" } ?: ""),
+                    style = MaterialTheme.typography.labelSmall, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                )
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+                    TextButton(onClick = { player.seekTo(maxOf(0, player.position() - 30_000)) }) { Text("−30") }
+                    Button(onClick = ::onPlayPressed) { Text(if (isPlaying) "Pause" else "Play") }
+                    TextButton(onClick = { player.seekTo(player.position() + 30_000) }) { Text("+30") }
+                    TextButton(onClick = {
+                        val next = SPEEDS.firstOrNull { it > speed + 0.01f } ?: SPEEDS.first()
+                        player.speed = next
+                        speed = next
+                    }) { Text("${"%.2f".format(speed).trimEnd('0').trimEnd('.')}×") }
+                    Box {
+                        IconButton(onClick = { menu = true }) { Icon(Icons.Filled.MoreVert, contentDescription = "More") }
+                        DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                            DropdownMenuItem(text = { Text("Go to the narrator's position") }, onClick = {
+                                menu = false
+                                player.pause()
+                                lifecycleScope.launch { findNarrator(player.position(), offered = false) }
+                            })
+                            DropdownMenuItem(text = { Text("Play from this page") }, onClick = {
+                                menu = false
+                                lifecycleScope.launch { listenFromPage() }
+                            })
+                            DropdownMenuItem(
+                                text = { Text("Follow the narrator") },
+                                trailingIcon = { if (prefs.followNarrator) Icon(Icons.Filled.Check, contentDescription = "On") },
+                                onClick = {
                                     menu = false
-                                    player.pause()
-                                    lifecycleScope.launch { findNarrator(player.position(), offered = false) }
-                                })
-                                DropdownMenuItem(text = { Text("Play from this page") }, onClick = {
+                                    ReaderSettings.update { it.copy(followNarrator = !it.followNarrator) }
+                                },
+                            )
+                            DropdownMenuItem(
+                                text = { Text(sleepLeftMs?.let { "Sleep timer · ${formatDuration(it)} left" } ?: "Sleep timer…") },
+                                onClick = {
                                     menu = false
-                                    lifecycleScope.launch { listenFromPage() }
-                                })
-                            }
+                                    sheet = Sheet.SLEEP
+                                },
+                            )
                         }
                     }
                 }
@@ -399,6 +682,10 @@ class BookActivity : AppCompatActivity() {
         private const val HIGHLIGHT_GROUP = "handoff"
         private const val PARAGRAPH_TINT = 0x33FFC107
         private const val SENTENCE_TINT = 0x99FFC107.toInt()
+        /** Brighter amber reads better on the dark page. */
+        private const val PARAGRAPH_TINT_DARK = 0x40FFD54F
+        private const val SENTENCE_TINT_DARK = 0xB3FFD54F.toInt()
+        private const val TICK_MS = 500L
         private const val INITIAL_LAYOUT_MS = 2_500L
         private const val JUMP_SETTLE_MS = 1_500L
         private const val SETTLE_MS = 400L
@@ -406,6 +693,12 @@ class BookActivity : AppCompatActivity() {
         private const val MAX_PAGE_TURNS = 5
         private const val LEAD_IN_MS = 1_500L
         private const val QUOTE_MAX = 220
+        /** Fraction of the page width on each side that turns pages when tapped. */
+        private const val TAP_EDGE = 0.22f
+        /** How much of the screen an edge tap scrolls in scroll mode. */
+        private const val SCREENFUL = 0.85
+        private const val AUTO_SCROLL_TICK_MS = 300L
+        private const val CHAPTER_LOAD_MS = 800L
         private val SPEEDS = listOf(0.8f, 1f, 1.2f, 1.5f, 1.75f, 2f)
 
         fun intent(context: Context, bookId: String) =

@@ -45,6 +45,9 @@ class HandoffEngine(
 ) {
     private val mutex = Mutex()
 
+    /** True once the speech model is on the device, so a probe won't start a download. */
+    val ready: Boolean get() = SpeechModel.isReady(context)
+
     private fun anchors(): AnchorMap {
         val saved = BookStore.get(bookId)?.anchors.orEmpty()
         return AnchorMap(book.text.length, playlist.timeline.totalMs).with(*saved.toTypedArray())

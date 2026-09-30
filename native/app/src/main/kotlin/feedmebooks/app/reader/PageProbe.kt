@@ -43,6 +43,27 @@ class PageProbe(private val navigator: EpubNavigatorFragment) {
         return runCatching { Where.valueOf(result) }.getOrDefault(Where.MISSING)
     }
 
+    /**
+     * Scroll mode: scrolls smoothly so that character [compactOffset] of the paragraph starting
+     * with [compactPrefix] sits in the upper part of the screen. False if the paragraph isn't in
+     * the current resource.
+     */
+    suspend fun scrollTo(compactPrefix: String, compactOffset: Int = 0): Boolean {
+        val script = """
+            (function() {
+              $PRELUDE
+              const p = ${JSONObject.quote(compactPrefix)};
+              const el = leaves().find(e => squash(e.textContent).startsWith(p));
+              if (!el) return false;
+              const r = charRect(el, $compactOffset) || el.getClientRects()[0];
+              if (!r) return false;
+              window.scrollBy({ top: r.top - H * $SCROLL_ANCHOR, left: 0, behavior: 'smooth' });
+              return true;
+            })()
+        """.trimIndent()
+        return decode(navigator.evaluateJavascript(script)) == true
+    }
+
     suspend fun firstVisible(): Visible? {
         val script = """
             (function() {
@@ -79,6 +100,9 @@ class PageProbe(private val navigator: EpubNavigatorFragment) {
         raw?.let { runCatching { JSONTokener(it).nextValue() }.getOrNull() }?.takeIf { it != JSONObject.NULL }
 
     companion object {
+        /** Where on the screen (fraction of its height) [scrollTo] places the target line. */
+        private const val SCROLL_ANCHOR = 0.3
+
         /**
          * Text-bearing leaf blocks; whitespace, soft hyphens and zero-width characters squashed
          * out; the rect of the n-th compact character; and on-screen tests that work for both

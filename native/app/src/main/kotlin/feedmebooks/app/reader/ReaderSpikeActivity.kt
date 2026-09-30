@@ -5,7 +5,6 @@ import android.view.ViewGroup.LayoutParams.MATCH_PARENT
 import android.view.ViewGroup.LayoutParams.WRAP_CONTENT
 import android.widget.LinearLayout
 import androidx.appcompat.app.AppCompatActivity
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -16,8 +15,6 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.darkColorScheme
-import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -41,6 +38,7 @@ import feedmebooks.app.SpikeState
 import feedmebooks.app.audio.Playlist
 import feedmebooks.app.audio.PlaylistTranscriber
 import feedmebooks.app.audio.formatDuration
+import feedmebooks.app.ui.AppTheme
 import feedmebooks.core.AnchorMap
 import feedmebooks.core.Handoff
 import feedmebooks.core.ParagraphRef
@@ -277,7 +275,7 @@ class ReaderSpikeActivity : AppCompatActivity() {
                 delay(500)
             }
         }
-        MaterialTheme(colorScheme = if (isSystemInDarkTheme()) darkColorScheme() else lightColorScheme()) {
+        AppTheme {
             Surface(tonalElevation = 3.dp) {
                 Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     Text(status, style = MaterialTheme.typography.bodySmall)

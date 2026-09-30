@@ -19,13 +19,23 @@ data class HandoffConfig(
     val minConfidence: Double = 0.4,
 )
 
-/** Where to open the book. [confident] is false when no match was found and this is only an estimate. */
+/**
+ * Where to open the book. [confident] is false when no match was found and this is only an estimate.
+ * [audioMs] is the playhead the target was computed for and [charsPerMs] the local narration
+ * rate, so the position can be carried forward while the audio keeps playing (see [at]).
+ */
 data class TextTarget(
     val charOffset: Int,
     val paragraph: ParagraphRef,
     val confident: Boolean,
     val anchors: AnchorMap,
-)
+    val audioMs: Long,
+    val charsPerMs: Double,
+) {
+    /** The narrator's estimated text position at [audioMs], extrapolated from this target. */
+    fun at(audioMs: Long): Int =
+        (charOffset + (audioMs - this.audioMs) * charsPerMs).toInt().coerceIn(0, anchors.totalChars - 1)
+}
 
 /** Where to start the audio. Callers typically seek a second or two earlier for context. */
 data class AudioTarget(
@@ -49,7 +59,7 @@ class Handoff(
     fun audioToText(audioMs: Long, anchors: AnchorMap): TextTarget {
         val transcript = transcriber.transcribe(max(0, audioMs - config.listenWindowMs), audioMs)
         val match = locate(transcript, anchors.audioToText(audioMs))
-            ?: return textTarget(anchors.audioToText(audioMs), false, anchors)
+            ?: return textTarget(anchors.audioToText(audioMs), false, anchors, audioMs, averageRate(anchors))
 
         val first = match.pairs.first()
         val last = match.pairs.last()
@@ -57,7 +67,7 @@ class Handoff(
         val rate = localRate(match, anchors)
         val offset = (last.charOffset + (audioMs - last.audioMs) * rate).toInt().coerceIn(0, book.length - 1)
         val updated = anchors.with(Anchor(first.charOffset, first.audioMs), Anchor(last.charOffset, last.audioMs))
-        return textTarget(offset, true, updated)
+        return textTarget(offset, true, updated, audioMs, rate)
     }
 
     /** Resume listening: when does the narrator read [charOffset]? */
@@ -117,11 +127,13 @@ class Handoff(
             val rate = (last.charOffset - first.charOffset).toDouble() / spanMs
             if (rate in MIN_RATE..MAX_RATE) return rate
         }
-        return anchors.totalChars.toDouble() / anchors.totalMs
+        return averageRate(anchors)
     }
 
-    private fun textTarget(charOffset: Int, confident: Boolean, anchors: AnchorMap) =
-        TextTarget(charOffset, book.paragraphAt(charOffset), confident, anchors)
+    private fun averageRate(anchors: AnchorMap) = anchors.totalChars.toDouble() / anchors.totalMs
+
+    private fun textTarget(charOffset: Int, confident: Boolean, anchors: AnchorMap, audioMs: Long, rate: Double) =
+        TextTarget(charOffset, book.paragraphAt(charOffset), confident, anchors, audioMs, rate)
 
     private companion object {
         // Plausible narration speeds: roughly 5–50 characters per second.

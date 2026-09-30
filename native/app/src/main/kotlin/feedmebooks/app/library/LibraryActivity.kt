@@ -13,7 +13,6 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -28,6 +27,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Card
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -39,8 +39,6 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.darkColorScheme
-import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -63,6 +61,8 @@ import feedmebooks.app.book.BookActivity
 import feedmebooks.app.book.OpenBooks
 import feedmebooks.app.book.SpeechModel
 import feedmebooks.app.reader.LoadedBook
+import feedmebooks.app.ui.AppTheme
+import feedmebooks.app.ui.ReaderSettingsSheet
 import feedmebooks.app.whisper.ModelStore
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -75,9 +75,7 @@ class LibraryActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         BookStore.init(this)
         setContent {
-            MaterialTheme(colorScheme = if (isSystemInDarkTheme()) darkColorScheme() else lightColorScheme()) {
-                LibraryScreen()
-            }
+            AppTheme { LibraryScreen() }
         }
     }
 }
@@ -89,6 +87,7 @@ private fun LibraryScreen() {
     val books by BookStore.books.collectAsState()
     var busy by remember { mutableStateOf<String?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
+    var settings by remember { mutableStateOf(false) }
     /** Book waiting for its audio folder (right after import, or from the card menu). */
     var audioFor by remember { mutableStateOf<String?>(null) }
 
@@ -130,7 +129,9 @@ private fun LibraryScreen() {
             Row(Modifier.fillMaxWidth().padding(start = 16.dp, end = 8.dp, top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
                 Text("Library", style = MaterialTheme.typography.headlineSmall, modifier = Modifier.weight(1f))
                 TextButton(onClick = { context.startActivity(Intent(context, LabActivity::class.java)) }) { Text("Lab") }
+                IconButton(onClick = { settings = true }) { Icon(Icons.Filled.Settings, contentDescription = "Settings") }
             }
+            if (settings) ReaderSettingsSheet(showFollow = true) { settings = false }
             busy?.let {
                 Column(Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
                     Text(it, style = MaterialTheme.typography.bodySmall)
