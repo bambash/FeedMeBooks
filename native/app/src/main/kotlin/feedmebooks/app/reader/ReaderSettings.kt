@@ -19,7 +19,13 @@ data class ReaderPrefs(
     val scroll: Boolean = false,
     /** While the audio plays, highlight the sentence being read and keep it on screen. */
     val followNarrator: Boolean = true,
+    /** Auto-scroll speed dial, 1 (slow) to 10 (fast); see [autoScrollPxPerSecond]. */
+    val autoScrollSpeed: Int = 3,
 ) {
+    /** The dial maps to CSS pixels per second, roughly 250 words per minute at 3 on a phone. */
+    val autoScrollPxPerSecond: Double
+        get() = 6.0 * Math.pow(1.4, (autoScrollSpeed.coerceIn(AUTO_SCROLL_MIN, AUTO_SCROLL_MAX) - 1).toDouble())
+
     fun isDark(systemDark: Boolean): Boolean = when (theme) {
         ReaderTheme.DARK -> true
         ReaderTheme.SYSTEM -> systemDark
@@ -41,6 +47,8 @@ data class ReaderPrefs(
 
     companion object {
         val FONT_SIZES = listOf(80, 90, 100, 110, 120, 135, 150, 175, 200)
+        const val AUTO_SCROLL_MIN = 1
+        const val AUTO_SCROLL_MAX = 10
     }
 }
 
@@ -58,6 +66,7 @@ object ReaderSettings {
             fontSizePercent = store.getInt("fontSize", 100),
             scroll = store.getBoolean("scroll", false),
             followNarrator = store.getBoolean("followNarrator", true),
+            autoScrollSpeed = store.getInt("autoScrollSpeed", 3),
         )
     }
 
@@ -70,6 +79,7 @@ object ReaderSettings {
             .putInt("fontSize", p.fontSizePercent)
             .putBoolean("scroll", p.scroll)
             .putBoolean("followNarrator", p.followNarrator)
+            .putInt("autoScrollSpeed", p.autoScrollSpeed)
             .apply()
     }
 }

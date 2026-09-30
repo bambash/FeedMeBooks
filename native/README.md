@@ -39,6 +39,10 @@ See [`../docs/poc-plan.md`](../docs/poc-plan.md) for the plan and decisions.
 ## In the reader
 
 - Tap the left or right edge of the page to turn it; tap the middle to hide or show the bar.
+- In the Scroll layout, sideways swipes don't change chapters (Readium's rule fired on almost
+  any flick). Edge taps scroll a screenful and cross into the next chapter at the end, where a
+  "Next chapter" chip also appears. **Auto** starts auto-scrolling with a speed dial (1–10);
+  it rolls on into the next chapter and stops at the end of the book.
 - **Aa** opens the reading settings; the list icon opens the table of contents.
 - With an audiobook attached, pressing play follows the narrator: the sentence being read
   is highlighted and pages turn by themselves. Turning a page yourself pauses the
