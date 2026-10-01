@@ -54,6 +54,38 @@ class BookTextTest {
     }
 
     @Test
+    fun `finds a selected snippet, telling repeated phrases apart by what comes before`() {
+        val text = BookText.build(
+            listOf(
+                Section("front.xhtml", listOf("Title")),
+                Section(
+                    "ch.xhtml",
+                    listOf(
+                        "He said yes. She left the room.",
+                        "He said yes. They stayed until the very end",
+                    ),
+                ),
+            ),
+        )
+        val first = text.text.indexOf("He said yes")
+        val second = text.text.lastIndexOf("He said yes")
+        // Nearest to the estimate when nothing else tells them apart.
+        assertEquals(first, text.find(1, 0.0, "He said yes"))
+        assertEquals(second, text.find(1, 1.0, "He said yes"))
+        // The text before the selection wins over the estimate.
+        assertEquals(second, text.find(1, 0.0, "He said yes.", before = "She left the room."))
+        assertEquals(first, text.find(1, 1.0, "He said", before = "Title"))
+        // Selections spanning paragraphs, and the last words of the last section, are found.
+        assertEquals(text.text.indexOf("left"), text.find(1, 0.0, "left the room.\nHe said yes."))
+        assertEquals(text.text.indexOf("very end"), text.find(1, 0.0, "very end"))
+        // A long selection with text that isn't in the book is placed by its opening words.
+        assertEquals(second, text.find(1, 0.0, "He said yes. They stayed until the very [note 1] end"))
+        assertEquals(null, text.find(1, 0.0, "not in the book"))
+        assertEquals(null, text.find(1, 0.0, "  "))
+        assertEquals(null, text.find(0, 0.0, "He said yes"))
+    }
+
+    @Test
     fun `finds the sentence around an offset`() {
         val text = BookText.build(
             listOf(

@@ -72,7 +72,7 @@ class HandoffEngine(
     /** When does the narrator read [charOffset]? */
     suspend fun textToAudio(charOffset: Int, onStatus: (String) -> Unit): AudioTarget = mutex.withLock {
         val handoff = handoff(onStatus)
-        onStatus("Finding this page in the audio…")
+        onStatus("Finding this place in the audio…")
         withContext(Dispatchers.Default) { handoff.textToAudio(charOffset, anchors()) }.also { remember(it.anchors) }
     }
 }
