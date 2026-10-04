@@ -1,6 +1,13 @@
 # FeedMeBooks
 
+*Read it. Hear it. Never lose your place.*
+
 A mobile-first app for reading ebooks and listening to audiobooks — with seamless session tracking between both formats.
+
+> **The current app is the native Android one in [`native/`](native/README.md)** (Kotlin, Compose,
+> Readium, Media3, whisper.cpp). See [`docs/poc-plan.md`](docs/poc-plan.md) for the plan and
+> [`docs/brand.md`](docs/brand.md) for the identity. The Expo app described below is the earlier
+> React Native version, kept in the repo but no longer maintained.
 
 ## Features
 

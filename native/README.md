@@ -29,6 +29,9 @@ See [`../docs/poc-plan.md`](../docs/poc-plan.md) for the plan and decisions.
     scrolled layout, and the follow-the-narrator switch. `ui/AppTheme` applies the theme
     to every screen; `ui/ReaderSettingsSheet` edits it (from the reader's "Aa" button or
     the library's gear).
+  - `ui/Brand`: the look (ink and amber on paper: colour schemes, serif headings, soft
+    corners); see [`../docs/brand.md`](../docs/brand.md). The launcher icon, splash screen
+    and notification icon are drawn from the same mark (`brand/icon.svg`).
   - `reader/PageProbe`: asks the rendered page what's on screen, because Readium's
     own answers were off by a page on a real book.
   - `whisper/`, `audio/`: whisper.cpp JNI, the model download, and MP4/MP3 decoding
@@ -51,6 +54,12 @@ See [`../docs/poc-plan.md`](../docs/poc-plan.md) for the plan and decisions.
   and the sleep timer.
 - Select some text (long-press, then drag the handles) and pick **Play from here** to start
   the audiobook at that passage. The selection menu also has Copy.
+
+## Brand and store assets
+
+`brand/` has the mark (`icon.svg`) and the feature graphic source; `store/` has the rendered
+Play listing icon and feature graphic. `brand/render.sh` rebuilds them with headless Chromium.
+[`../docs/brand.md`](../docs/brand.md) documents the palette, type and usage rules.
 
 ## Test
 

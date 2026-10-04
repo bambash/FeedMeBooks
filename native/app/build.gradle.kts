@@ -86,6 +86,8 @@ dependencies {
     implementation("androidx.compose.ui:ui")
     implementation("androidx.activity:activity-compose:1.9.3")
     implementation("androidx.appcompat:appcompat:1.7.0")
+    // The launch screen (the mark on ink) on every Android version the app supports.
+    implementation("androidx.core:core-splashscreen:1.0.1")
     implementation("androidx.fragment:fragment-ktx:1.8.7")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.9.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")

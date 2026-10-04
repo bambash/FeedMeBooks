@@ -7,12 +7,15 @@ import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
 import androidx.media3.common.Player
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.common.util.UnstableApi
+import androidx.media3.session.DefaultMediaNotificationProvider
 import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService
 import androidx.media3.session.SessionCommand
 import androidx.media3.session.SessionResult
 import com.google.common.util.concurrent.Futures
 import com.google.common.util.concurrent.ListenableFuture
+import feedmebooks.app.R
 import feedmebooks.app.library.BookStore
 import feedmebooks.app.library.LibraryActivity
 import kotlinx.coroutines.CoroutineScope
@@ -39,9 +42,14 @@ class PlaybackService : MediaSessionService() {
     /** Wall-clock time at which the sleep timer pauses playback. */
     private var sleepAt: Long? = null
 
+    @androidx.annotation.OptIn(UnstableApi::class)
     override fun onCreate() {
         super.onCreate()
         BookStore.init(this)
+        // The notification's status-bar icon is the brand mark, not Media3's generic note.
+        setMediaNotificationProvider(
+            DefaultMediaNotificationProvider(this).apply { setSmallIcon(R.drawable.ic_stat_feedmebooks) },
+        )
         val player = ExoPlayer.Builder(this)
             .setAudioAttributes(
                 AudioAttributes.Builder().setUsage(C.USAGE_MEDIA).setContentType(C.AUDIO_CONTENT_TYPE_SPEECH).build(),

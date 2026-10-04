@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- The window behind every screen: paper by day, night after dark (values-night). -->
+    <style name="Theme.FeedMeBooks" parent="Theme.AppCompat.DayNight.NoActionBar">
+        <item name="colorPrimary">@color/ink</item>
+        <item name="colorPrimaryDark">@color/ink_deep</item>
+        <item name="colorAccent">@color/amber</item>
+        <item name="android:windowBackground">@color/paper</item>
+        <item name="android:statusBarColor">@color/paper</item>
+        <item name="android:navigationBarColor">@color/paper</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:windowLightNavigationBar">true</item>
+    </style>
+
+    <!-- Shown while the app starts: the mark on ink, then hands over to Theme.FeedMeBooks. -->
+    <style name="Theme.FeedMeBooks.Starting" parent="Theme.SplashScreen">
+        <item name="windowSplashScreenBackground">@color/ink</item>
+        <item name="windowSplashScreenAnimatedIcon">@drawable/ic_launcher_foreground</item>
+        <item name="postSplashScreenTheme">@style/Theme.FeedMeBooks</item>
+    </style>
+</resources>

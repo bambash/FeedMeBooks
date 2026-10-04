@@ -16,10 +16,12 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
@@ -48,13 +50,20 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 import feedmebooks.app.LabActivity
+import feedmebooks.app.R
 import feedmebooks.app.audio.Playlist
 import feedmebooks.app.audio.formatDuration
 import feedmebooks.app.book.BookActivity
@@ -72,6 +81,7 @@ import org.readium.r2.shared.publication.services.cover
 /** The launcher: your books, with reading and listening progress, and adding new ones. */
 class LibraryActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
+        installSplashScreen()
         super.onCreate(savedInstanceState)
         BookStore.init(this)
         setContent {
@@ -126,8 +136,13 @@ private fun LibraryScreen() {
         },
     ) { padding ->
         Column(Modifier.fillMaxSize().padding(padding)) {
-            Row(Modifier.fillMaxWidth().padding(start = 16.dp, end = 8.dp, top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-                Text("Library", style = MaterialTheme.typography.headlineSmall, modifier = Modifier.weight(1f))
+            Row(
+                Modifier.fillMaxWidth().padding(start = 16.dp, end = 8.dp, top = 12.dp, bottom = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                Image(painterResource(R.drawable.ic_brand_mark), contentDescription = null, modifier = Modifier.size(30.dp))
+                Text(stringResource(R.string.app_name), style = MaterialTheme.typography.headlineSmall, modifier = Modifier.weight(1f))
                 TextButton(onClick = { context.startActivity(Intent(context, LabActivity::class.java)) }) { Text("Lab") }
                 IconButton(onClick = { settings = true }) { Icon(Icons.Filled.Settings, contentDescription = "Settings") }
             }
@@ -144,13 +159,7 @@ private fun LibraryScreen() {
                     TextButton(onClick = { error = null }) { Text("OK") }
                 }
             }
-            if (books.isEmpty() && busy == null) {
-                Text(
-                    "Add a book: pick its EPUB, then the folder with its audiobook files.",
-                    style = MaterialTheme.typography.bodyMedium,
-                    modifier = Modifier.padding(16.dp),
-                )
-            }
+            if (books.isEmpty() && busy == null) EmptyLibrary()
             LazyColumn(contentPadding = PaddingValues(16.dp, 8.dp, 16.dp, 96.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 items(books, key = { it.id }) { book ->
                     BookCard(
@@ -176,24 +185,59 @@ private fun LibraryScreen() {
     }
 }
 
+/** The first thing a new user sees: the mark, the promise, and what to do. */
+@Composable
+private fun EmptyLibrary() {
+    Column(
+        Modifier.fillMaxWidth().padding(horizontal = 32.dp, vertical = 48.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        Image(painterResource(R.drawable.ic_brand_mark), contentDescription = null, modifier = Modifier.size(96.dp))
+        Text(stringResource(R.string.app_tagline), style = MaterialTheme.typography.titleLarge, textAlign = TextAlign.Center)
+        Text(
+            "Add a book: pick its EPUB, then the folder with its audiobook files. " +
+                "Switch between reading and listening whenever you like; the other one picks up where you are.",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            textAlign = TextAlign.Center,
+        )
+    }
+}
+
+/** One book: cover, title, and how far it has been read (ink) and listened to (amber). */
 @Composable
 private fun BookCard(book: BookRecord, onOpen: () -> Unit, onSetAudio: () -> Unit, onRemove: () -> Unit) {
     var menu by remember { mutableStateOf(false) }
     val cover = remember(book.id) { loadCover(book.id) }
+    val colors = MaterialTheme.colorScheme
     Card(Modifier.fillMaxWidth().clickable(onClick = onOpen)) {
-        Row(Modifier.padding(12.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            Box(Modifier.size(56.dp, 84.dp).background(MaterialTheme.colorScheme.surfaceVariant)) {
+        Row(Modifier.padding(12.dp), horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+            Box(Modifier.size(60.dp, 90.dp).clip(MaterialTheme.shapes.small).background(colors.surfaceVariant)) {
                 cover?.let { Image(it.asImageBitmap(), contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize()) }
+                    ?: Image(
+                        painterResource(R.drawable.ic_brand_mark), contentDescription = null,
+                        modifier = Modifier.size(32.dp).align(Alignment.Center),
+                    )
             }
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                 Text(book.title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold, maxLines = 2, overflow = TextOverflow.Ellipsis)
-                book.author?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
-                Text("Read ${(book.readingProgress * 100).toInt()}%", style = MaterialTheme.typography.bodySmall)
-                Text(
-                    if (book.hasAudio) "Listened ${formatDuration(book.audioMs)} of ${formatDuration(book.totalAudioMs)} · ${book.tracks.size} files"
-                    else "No audiobook yet",
-                    style = MaterialTheme.typography.bodySmall,
+                book.author?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant) }
+                Spacer(Modifier.height(6.dp))
+                Progress(
+                    label = "Read ${(book.readingProgress * 100).toInt()}%",
+                    fraction = book.readingProgress.toFloat(),
+                    color = colors.primary,
                 )
+                if (book.hasAudio) {
+                    Progress(
+                        label = "Listened ${formatDuration(book.audioMs)} of ${formatDuration(book.totalAudioMs)} · ${book.tracks.size} files",
+                        fraction = if (book.totalAudioMs > 0) book.audioMs.toFloat() / book.totalAudioMs else 0f,
+                        color = colors.tertiary,
+                    )
+                } else {
+                    Text("No audiobook yet", style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
+                }
             }
             Box {
                 IconButton(onClick = { menu = true }) { Icon(Icons.Filled.MoreVert, contentDescription = "More") }
@@ -204,6 +248,17 @@ private fun BookCard(book: BookRecord, onOpen: () -> Unit, onSetAudio: () -> Uni
             }
         }
     }
+}
+
+@Composable
+private fun Progress(label: String, fraction: Float, color: Color) {
+    Text(label, style = MaterialTheme.typography.bodySmall)
+    LinearProgressIndicator(
+        progress = { fraction.coerceIn(0f, 1f) },
+        color = color,
+        trackColor = MaterialTheme.colorScheme.surfaceVariant,
+        modifier = Modifier.fillMaxWidth().padding(top = 2.dp, bottom = 4.dp),
+    )
 }
 
 private fun loadCover(id: String): Bitmap? =
