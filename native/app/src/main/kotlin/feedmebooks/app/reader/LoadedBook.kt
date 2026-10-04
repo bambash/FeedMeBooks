@@ -49,6 +49,20 @@ class LoadedBook(
 
     private val sectionHrefs: List<String> = locators.map { it.firstOrNull()?.href?.toString() ?: "" }
 
+    /**
+     * Book offset where a text [selection] made in the reader starts, or null if its words can't
+     * be found. The navigator reports a selection as the page's locator with the selected text
+     * and the text just before it, so the snippet is looked up in that resource near the page.
+     */
+    fun selectionStart(selection: Locator): Int? {
+        val href = selection.href.toString()
+        val section = sectionHrefs.indexOf(href).takeIf { it >= 0 }
+            ?: sectionHrefs.indexOf(href.substringBefore('#')).takeIf { it >= 0 }
+            ?: return null
+        val highlight = selection.text.highlight?.takeIf { it.isNotBlank() } ?: return null
+        return text.find(section, selection.locations.progression ?: 0.0, highlight, selection.text.before)
+    }
+
     /** The paragraph's opening text without whitespace, as the page probe compares it. */
     fun compactPrefix(paragraph: ParagraphRef, length: Int = PREFIX_LENGTH): String =
         PageProbe.compact(text.text.substring(paragraph.charStart, paragraph.charEnd)).take(length)

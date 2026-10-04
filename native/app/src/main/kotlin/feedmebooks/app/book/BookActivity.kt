@@ -1,8 +1,13 @@
 package feedmebooks.app.book
 
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.os.Bundle
+import android.view.ActionMode
+import android.view.Menu
+import android.view.MenuItem
 import android.view.ViewGroup.LayoutParams.MATCH_PARENT
 import android.view.ViewGroup.LayoutParams.WRAP_CONTENT
 import android.widget.LinearLayout
@@ -84,8 +89,9 @@ import kotlin.math.roundToInt
  *
  * Handoff is offered rather than forced: when you come back to the book after listening, it
  * offers to jump to where the narrator is; when you press play after reading, it offers to
- * start the audio from the page you're on. While the audio plays, [ReadAlong] highlights the
- * sentence being read and keeps it on screen (unless turned off in the settings).
+ * start the audio from the page you're on. Selecting text offers to play from that passage.
+ * While the audio plays, [ReadAlong] highlights the sentence being read and keeps it on screen
+ * (unless turned off in the settings).
  *
  * In the scrolled layout, sideways swipes don't change chapters (Readium's own rule fired on
  * almost any flick); the page edges and a "Next chapter" chip do, and an auto-scroll with a
@@ -150,7 +156,10 @@ class BookActivity : AppCompatActivity() {
                 initialLocator = initial,
                 initialPreferences = prefs.epubPreferences(isSystemDark()),
                 // Otherwise, in scroll mode, any flick with a sideways component jumps a whole chapter.
-                configuration = EpubNavigatorFragment.Configuration(disablePageTurnsWhileScrolling = true),
+                configuration = EpubNavigatorFragment.Configuration(
+                    disablePageTurnsWhileScrolling = true,
+                    selectionActionModeCallback = selectionMenu,
+                ),
             )
         super.onCreate(savedInstanceState)
 
@@ -268,6 +277,39 @@ class BookActivity : AppCompatActivity() {
             }
             return true
         }
+    }
+
+    /**
+     * The menu over selected text: play the audiobook from the selection, or copy it. (Providing
+     * a menu replaces the system one, so Copy is added back.) The selection is read before
+     * the menu closes, because closing it may deselect the text.
+     */
+    private val selectionMenu = object : ActionMode.Callback {
+        override fun onCreateActionMode(mode: ActionMode, menu: Menu): Boolean {
+            if (record?.hasAudio == true) menu.add(Menu.NONE, MENU_PLAY_FROM_SELECTION, 0, "Play from here")
+            menu.add(Menu.NONE, MENU_COPY, 1, android.R.string.copy)
+            return true
+        }
+
+        override fun onPrepareActionMode(mode: ActionMode, menu: Menu) = false
+
+        override fun onActionItemClicked(mode: ActionMode, item: MenuItem): Boolean {
+            if (item.itemId != MENU_PLAY_FROM_SELECTION && item.itemId != MENU_COPY) return false
+            lifecycleScope.launch {
+                val selection = navigator.currentSelection()?.locator
+                navigator.clearSelection()
+                mode.finish()
+                when (item.itemId) {
+                    MENU_PLAY_FROM_SELECTION -> listenFromSelection(selection)
+                    MENU_COPY -> selection?.text?.highlight?.let {
+                        getSystemService(ClipboardManager::class.java).setPrimaryClip(ClipData.newPlainText(null, it))
+                    }
+                }
+            }
+            return true
+        }
+
+        override fun onDestroyActionMode(mode: ActionMode) {}
     }
 
     // ---- Moving through the book ----------------------------------------------------------
@@ -493,19 +535,32 @@ class BookActivity : AppCompatActivity() {
     }
 
     private suspend fun listenFromPage() {
-        val player = link ?: return
-        val eng = engine ?: return
         val text = opened.text.await()
         val charOffset = topOfScreen(text) ?: run { banner = Banner.Info("Can't tell what's on screen."); return }
+        listenFrom(text, charOffset, what = "this page")
+    }
+
+    /** Text the reader selected: start the audio where the narrator reads its first words. */
+    private suspend fun listenFromSelection(selection: Locator?) {
+        val text = opened.text.await()
+        val charOffset = selection?.let { text.selectionStart(it) }
+            ?: run { banner = Banner.Info("Couldn't find the selected text in the book."); return }
+        listenFrom(text, charOffset, what = "this passage")
+    }
+
+    /** Finds where the narrator reads [charOffset] and plays from just before it. [what] names it in messages. */
+    private suspend fun listenFrom(text: LoadedBook, charOffset: Int, what: String) {
+        val player = link ?: return
+        val eng = engine ?: run { banner = Banner.Info("Still connecting to the player…"); return }
         highlight(text, charOffset)
-        banner = Banner.Working("Finding this page in the audio…")
+        banner = Banner.Working("Finding $what in the audio…")
         val target = runCatching { eng.textToAudio(charOffset) { banner = Banner.Working(it) } }
-            .getOrElse { banner = Banner.Info("Couldn't find this page in the audio: ${it.message}"); return }
+            .getOrElse { banner = Banner.Info("Couldn't find $what in the audio: ${it.message}"); return }
         player.seekTo(maxOf(0, target.audioMs - LEAD_IN_MS))
         readAlong?.resume()
         player.play()
         markSynced()
-        banner = if (target.confident) null else Banner.Info("Started near this page (couldn't pin it down exactly).")
+        banner = if (target.confident) null else Banner.Info("Started near $what (couldn't pin it down exactly).")
     }
 
     // ---- UI ---------------------------------------------------------------------------
@@ -680,6 +735,8 @@ class BookActivity : AppCompatActivity() {
         private const val EXTRA_BOOK_ID = "bookId"
         private const val NAVIGATOR_TAG = "navigator"
         private const val HIGHLIGHT_GROUP = "handoff"
+        private const val MENU_PLAY_FROM_SELECTION = 1
+        private const val MENU_COPY = 2
         private const val PARAGRAPH_TINT = 0x33FFC107
         private const val SENTENCE_TINT = 0x99FFC107.toInt()
         /** Brighter amber reads better on the dark page. */

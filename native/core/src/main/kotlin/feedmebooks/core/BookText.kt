@@ -141,24 +141,56 @@ class BookText private constructor(
      * snippet's words in the section nearest the progression estimate, or the
      * estimate itself if the snippet isn't found.
      */
-    fun resolve(sectionIndex: Int, progression: Double, snippet: String?): Int {
+    fun resolve(sectionIndex: Int, progression: Double, snippet: String?): Int =
+        snippet?.let { find(sectionIndex, progression, it) } ?: charOffsetOf(sectionIndex, progression)
+
+    /**
+     * Finds [snippet] (e.g. text the reader selected) in a section and returns the book offset
+     * where it starts, or null if its words aren't there. When it occurs more than once, the
+     * occurrence preceded by the last words of [before] (the text just ahead of the snippet on
+     * the page) wins, then the one nearest the [progression] estimate. A long snippet that
+     * isn't found as a whole (a footnote marker or caption mixed in) is retried from its first
+     * few words, which is enough to place its start.
+     */
+    fun find(sectionIndex: Int, progression: Double, snippet: String, before: String? = null): Int? {
+        val tokens = tokens(snippet)
+        if (tokens.isEmpty()) return null
         val estimate = charOffsetOf(sectionIndex, progression)
-        val needle = snippet?.let { s -> Normalize.words(s).map { Normalize.token(it.value) }.toList() }
-        if (needle.isNullOrEmpty()) return estimate
         val from = wordIndexAt(sectionStart(sectionIndex))
-        val to = wordIndexAt(sectionEnd(sectionIndex))
-        var best = -1
-        for (i in from..(to - needle.size)) {
-            if (needle.indices.all { words[i + it].norm == needle[it] }) {
-                if (best < 0 || kotlin.math.abs(words[i].charStart - estimate) < kotlin.math.abs(words[best].charStart - estimate)) {
-                    best = i
-                }
-            }
+        val end = sectionEnd(sectionIndex)
+        var to = wordIndexAt(end) // exclusive: the first word at or after the section end
+        if (to < words.size && words[to].charStart < end) to++
+        val context = before?.let { tokens(it).takeLast(CONTEXT_WORDS) }.orEmpty()
+
+        fun occurrences(needle: List<String>) = (from..(to - needle.size)).filter { i ->
+            needle.indices.all { words[i + it].norm == needle[it] }
         }
-        return if (best >= 0) words[best].charStart else estimate
+
+        var found = occurrences(tokens)
+        if (found.isEmpty() && tokens.size > HEAD_WORDS) found = occurrences(tokens.take(HEAD_WORDS))
+        if (found.isEmpty()) return null
+        val best = found.minWith(
+            compareByDescending<Int> { i -> contextMatch(i, context) }
+                .thenBy { i -> kotlin.math.abs(words[i].charStart - estimate) },
+        )
+        return words[best].charStart
     }
 
+    /** How many of [context]'s trailing words are read, in order, right before word [index]. */
+    private fun contextMatch(index: Int, context: List<String>): Int {
+        var n = 0
+        while (n < context.size && index - 1 - n >= 0 && words[index - 1 - n].norm == context[context.size - 1 - n]) n++
+        return n
+    }
+
+    private fun tokens(text: String): List<String> = Normalize.words(text).map { Normalize.token(it.value) }.toList()
+
     companion object {
+        /** Words of the snippet tried on their own when the whole snippet isn't in the text. */
+        private const val HEAD_WORDS = 6
+        /** Trailing words of the "before" context used to tell repeated phrases apart. */
+        private const val CONTEXT_WORDS = 3
+
         fun build(sections: List<Section>): BookText {
             val sb = StringBuilder()
             val words = ArrayList<Word>()

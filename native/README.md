@@ -49,6 +49,8 @@ See [`../docs/poc-plan.md`](../docs/poc-plan.md) for the plan and decisions.
   following; "Back to the narrator" resumes it. Turn it off under Aa → Follow the narrator.
 - The ⋮ menu has the handoffs ("Go to the narrator's position", "Play from this page")
   and the sleep timer.
+- Select some text (long-press, then drag the handles) and pick **Play from here** to start
+  the audiobook at that passage. The selection menu also has Copy.
 
 ## Test
 
