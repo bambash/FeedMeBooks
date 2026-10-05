@@ -7,40 +7,57 @@ description: Use when a session is ending, before /compact, after a milestone (P
 
 ## Overview
 
-`HANDOFF.md` at the repo root is the local-only checkpoint a fresh session reads first.
-A global SessionStart hook (`~/.claude/hooks/handoff-load.sh`) injects it into context, and
-a UserPromptSubmit hook (`~/.claude/hooks/handoff-stale.sh`) reminds once an hour when a
-commit has landed after it was written. It holds only what the repo, git history, and the
-project's instruction files cannot tell a reader who has no chat history.
+`HANDOFF.md` at the repo root is the checkpoint a fresh session reads first. In this repo it
+is **tracked and committed on the working branch**: sessions run in Claude Code cloud
+containers that are discarded afterwards, so a local-only file would never reach the next
+session. The branch is the only thing that survives.
 
-Write it at every milestone, not only at the end. A crash or compaction loses everything
-since the last write.
+Two repo-local hooks, registered in `.claude/settings.json`, make it automatic:
+
+- `.claude/hooks/handoff-load.sh` (SessionStart) injects `HANDOFF.md` into context on
+  startup, resume, clear, compact and fork, and reports whether it is stale.
+- `.claude/hooks/handoff-stale.sh` (UserPromptSubmit) reminds once an hour when commits
+  have landed after the commit that last touched `HANDOFF.md`.
+
+Staleness is counted in commits, never file mtime: a fresh clone gives every file the clone
+time. The file holds only what the repo, git history, and the project's instruction files
+cannot tell a reader who has no chat history.
+
+Write it at every milestone, not only at the end. A crash, compaction, or reclaimed
+container loses everything since the last write.
 
 ## Steps
 
 1. **Locate.** `top=$(git rev-parse --show-toplevel)`; the file is `$top/HANDOFF.md`.
-2. **Ensure it is ignored, then never stage it.**
+2. **Make sure it can be committed.** An older version of this workflow excluded it locally;
+   undo that if present, or `git add` will refuse the file.
    ```bash
-   git check-ignore -q HANDOFF.md || echo HANDOFF.md >> .git/info/exclude
+   git check-ignore -q HANDOFF.md && sed -i '/^HANDOFF\.md$/d' .git/info/exclude
    ```
-   Use `.git/info/exclude`, not the tracked `.gitignore`, so the tree stays clean.
 3. **Gather facts fresh; do not recall them.** `git log --oneline -5`, `git status --short`,
    `git worktree list`, `gh pr list --author @me --state open` (when `gh` exists), plus any
-   environment state you verified this session.
+   environment state you verified this session. In a cloud session note the branch name the
+   harness assigned (`git branch --show-current`); the next session is told the same branch.
 4. **Overwrite the whole file** with the template below. Never append. Stale text is deleted,
    not marked stale.
-5. **Verify.** `git status --porcelain HANDOFF.md` prints nothing; the file is under about
-   150 lines; every item under **Next** names a command or file a stranger could act on.
+5. **Verify.** The file is under about 150 lines; every item under **Next** names a command
+   or file a stranger could act on; it contains no secret values.
+6. **Commit and push it on the working branch**, on its own or with the milestone commit:
+   ```bash
+   git add HANDOFF.md && git commit -m "handoff: <one-line session name>" && git push -u origin "$(git branch --show-current)"
+   ```
+   An unpushed handoff is lost with the container. It is fine for the file to ride along in
+   the pull request; it documents the work for the reviewer too.
 
 ## Template
 
 ```markdown
 # HANDOFF — <repo> (written YYYY-MM-DD HH:MM, <one-line session name>)
 
-Local-only. Never commit. Read the project's instruction files first; this file holds only what the repo and git history cannot tell you.
+Committed checkpoint for the next session. Read the project's instruction files first; this file holds only what the repo and git history cannot tell you.
 
 ## Where things are
-- `main` = <sha> (<PR # / subject>). Open PRs, branches, worktrees, open spec changes.
+- `main` = <sha> (<PR # / subject>). Working branch = <name>. Open PRs, branches, worktrees, open spec changes.
 - <environment> runs <sha>, verified by <check>. Config and credential *locations* (paths only, never values).
 - Lanes: one line per running or stopped lane, `#<issue> → <branch> → PR #<n> → <phase> → <blocker>` (the `varroa-lane-brief` status board), or "none".
 
@@ -66,14 +83,16 @@ Local-only. Never commit. Read the project's instruction files first; this file 
 - A rejected option or a reversed decision stays in the file under **Decisions and non-goals**.
 - **Next** items are commands and files with an acceptance check, never "confirm scope with the user".
 - Nothing the repo can derive: file layout, function names, what a commit changed.
-- Never a secret value, token, or password. Paths to them are fine.
+- Never a secret value, token, or password. Paths to them are fine. The file is committed
+  and will be visible to anyone who can read the repository.
 
 ## Common mistakes
 
 | Mistake | Fix |
 |---|---|
 | Append a dated section under the old one | Overwrite; one current file |
-| Notice the file is not ignored and leave it | Step 2 adds it to `.git/info/exclude` |
+| Write the file but leave it uncommitted or unpushed | Step 6; a cloud container is discarded with the file in it |
+| `git add` refuses the file as ignored | Step 2 removes the old `.git/info/exclude` entry |
 | Drop the "dropped / do not do" items from the old file | Carry them into **Decisions and non-goals** |
 | "Next: discuss with the user" | Name the command or file and the check that proves it done |
 | Write it only when asked at session end | Write it after each merge, deploy, or archive, and before `/compact` |

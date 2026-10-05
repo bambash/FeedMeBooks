@@ -1,24 +1,12 @@
 {
   "hooks": {
-    "PreToolUse": [
-      {
-        "matcher": "Bash",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "/home/nate/.claude/hooks/wait-guard.py",
-            "statusMessage": "Checking wait budget"
-          }
-        ]
-      }
-    ],
     "SessionStart": [
       {
         "matcher": "startup|resume|clear|compact|fork",
         "hooks": [
           {
             "type": "command",
-            "command": "/home/nate/.claude/hooks/handoff-load.sh",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/handoff-load.sh",
             "statusMessage": "Loading HANDOFF.md"
           }
         ]
@@ -29,7 +17,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/home/nate/.claude/hooks/handoff-stale.sh"
+            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/handoff-stale.sh"
           }
         ]
       }
