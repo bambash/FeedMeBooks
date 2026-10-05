@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  FeedMeBooks brand colours. The Compose schemes in ui/Brand.kt are built from the same values;
+  these are the ones the window, splash screen and launcher need before Compose is up.
+-->
+<resources>
+    <!-- Ink: the brand colour. Text, buttons, the launcher background. -->
+    <color name="ink">#FF2F4170</color>
+    <color name="ink_deep">#FF1F2E55</color>
+    <!-- Amber: the narrator's voice. Highlights, the voice bars in the mark. -->
+    <color name="amber">#FFF5B52E</color>
+    <!-- Paper: the light surface. -->
+    <color name="paper">#FFFCFAF6</color>
+    <!-- Night: the dark surface. -->
+    <color name="night">#FF121316</color>
+</resources>

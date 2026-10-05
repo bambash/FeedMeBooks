@@ -18,15 +18,16 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.MoreVert
-import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -44,6 +45,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.platform.ComposeView
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -67,6 +69,7 @@ import feedmebooks.app.reader.ReaderPrefs
 import feedmebooks.app.reader.ReaderSettings
 import feedmebooks.app.reader.isSystemDark
 import feedmebooks.app.ui.AppTheme
+import feedmebooks.app.ui.Brand
 import feedmebooks.app.ui.ReaderSettingsSheet
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -169,7 +172,7 @@ class BookActivity : AppCompatActivity() {
             LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f),
         )
         root.addView(
-            ComposeView(this).apply { setContent { AppTheme { BottomBar() } } },
+            ComposeView(this).apply { setContent { AppTheme(windowColors = false) { BottomBar() } } },
             LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT),
         )
         ViewCompat.setOnApplyWindowInsetsListener(root) { view, insets ->
@@ -249,6 +252,10 @@ class BookActivity : AppCompatActivity() {
         val background = prefs.readiumTheme(systemDark).backgroundColor
         root.setBackgroundColor(background)
         window.decorView.setBackgroundColor(background)
+        @Suppress("DEPRECATION")
+        window.statusBarColor = background
+        @Suppress("DEPRECATION")
+        window.navigationBarColor = background
         WindowCompat.getInsetsController(window, root).isAppearanceLightStatusBars = !prefs.isDark(systemDark)
     }
 
@@ -444,11 +451,11 @@ class BookActivity : AppCompatActivity() {
             listOf(
                 Decoration(
                     "paragraph", text.locatorOf(paragraph),
-                    Decoration.Style.Highlight(tint = if (dark) PARAGRAPH_TINT_DARK else PARAGRAPH_TINT),
+                    Decoration.Style.Highlight(tint = if (dark) Brand.PARAGRAPH_TINT_DARK else Brand.PARAGRAPH_TINT),
                 ),
                 Decoration(
                     "sentence", text.sentenceLocator(charOffset),
-                    Decoration.Style.Highlight(tint = if (dark) SENTENCE_TINT_DARK else SENTENCE_TINT),
+                    Decoration.Style.Highlight(tint = if (dark) Brand.SENTENCE_TINT_DARK else Brand.SENTENCE_TINT),
                 ),
             ),
             HIGHLIGHT_GROUP,
@@ -654,16 +661,29 @@ class BookActivity : AppCompatActivity() {
                     positionText + (sleepLeftMs?.let { " · sleep in ${formatDuration(it)}" } ?: ""),
                     style = MaterialTheme.typography.labelSmall, maxLines = 1, overflow = TextOverflow.Ellipsis,
                 )
-                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(2.dp)) {
-                    TextButton(onClick = { player.seekTo(maxOf(0, player.position() - 30_000)) }) { Text("−30") }
-                    Button(onClick = ::onPlayPressed) { Text(if (isPlaying) "Pause" else "Play") }
-                    TextButton(onClick = { player.seekTo(player.position() + 30_000) }) { Text("+30") }
-                    TextButton(onClick = {
-                        val next = SPEEDS.firstOrNull { it > speed + 0.01f } ?: SPEEDS.first()
-                        player.speed = next
-                        speed = next
-                    }) { Text("${"%.2f".format(speed).trimEnd('0').trimEnd('.')}×") }
-                    Box {
+                // Transport in the middle of the bar; speed on the left and the menu on the right balance it.
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Box(Modifier.weight(1f), contentAlignment = Alignment.CenterStart) {
+                        TextButton(onClick = {
+                            val next = SPEEDS.firstOrNull { it > speed + 0.01f } ?: SPEEDS.first()
+                            player.speed = next
+                            speed = next
+                        }) { Text("${"%.2f".format(speed).trimEnd('0').trimEnd('.')}×") }
+                    }
+                    IconButton(onClick = { player.seekTo(maxOf(0, player.position() - 30_000)) }) {
+                        Icon(painterResource(R.drawable.ic_replay_30), contentDescription = "Back 30 seconds")
+                    }
+                    FilledIconButton(onClick = ::onPlayPressed, modifier = Modifier.padding(horizontal = 8.dp).size(52.dp)) {
+                        Icon(
+                            painterResource(if (isPlaying) R.drawable.ic_pause else R.drawable.ic_play),
+                            contentDescription = if (isPlaying) "Pause" else "Play",
+                            modifier = Modifier.size(30.dp),
+                        )
+                    }
+                    IconButton(onClick = { player.seekTo(player.position() + 30_000) }) {
+                        Icon(painterResource(R.drawable.ic_forward_30), contentDescription = "Forward 30 seconds")
+                    }
+                    Box(Modifier.weight(1f), contentAlignment = Alignment.CenterEnd) {
                         IconButton(onClick = { menu = true }) { Icon(Icons.Filled.MoreVert, contentDescription = "More") }
                         DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
                             DropdownMenuItem(text = { Text("Go to the narrator's position") }, onClick = {
@@ -685,6 +705,7 @@ class BookActivity : AppCompatActivity() {
                             )
                             DropdownMenuItem(
                                 text = { Text(sleepLeftMs?.let { "Sleep timer · ${formatDuration(it)} left" } ?: "Sleep timer…") },
+                                leadingIcon = { Icon(painterResource(R.drawable.ic_sleep), contentDescription = null) },
                                 onClick = {
                                     menu = false
                                     sheet = Sheet.SLEEP
@@ -737,11 +758,6 @@ class BookActivity : AppCompatActivity() {
         private const val HIGHLIGHT_GROUP = "handoff"
         private const val MENU_PLAY_FROM_SELECTION = 1
         private const val MENU_COPY = 2
-        private const val PARAGRAPH_TINT = 0x33FFC107
-        private const val SENTENCE_TINT = 0x99FFC107.toInt()
-        /** Brighter amber reads better on the dark page. */
-        private const val PARAGRAPH_TINT_DARK = 0x40FFD54F
-        private const val SENTENCE_TINT_DARK = 0xB3FFD54F.toInt()
         private const val TICK_MS = 500L
         private const val INITIAL_LAYOUT_MS = 2_500L
         private const val JUMP_SETTLE_MS = 1_500L
