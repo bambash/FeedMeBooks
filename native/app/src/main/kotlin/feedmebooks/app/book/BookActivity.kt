@@ -661,11 +661,19 @@ class BookActivity : AppCompatActivity() {
                     positionText + (sleepLeftMs?.let { " · sleep in ${formatDuration(it)}" } ?: ""),
                     style = MaterialTheme.typography.labelSmall, maxLines = 1, overflow = TextOverflow.Ellipsis,
                 )
-                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+                // Transport in the middle of the bar; speed on the left and the menu on the right balance it.
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Box(Modifier.weight(1f), contentAlignment = Alignment.CenterStart) {
+                        TextButton(onClick = {
+                            val next = SPEEDS.firstOrNull { it > speed + 0.01f } ?: SPEEDS.first()
+                            player.speed = next
+                            speed = next
+                        }) { Text("${"%.2f".format(speed).trimEnd('0').trimEnd('.')}×") }
+                    }
                     IconButton(onClick = { player.seekTo(maxOf(0, player.position() - 30_000)) }) {
                         Icon(painterResource(R.drawable.ic_replay_30), contentDescription = "Back 30 seconds")
                     }
-                    FilledIconButton(onClick = ::onPlayPressed, modifier = Modifier.size(52.dp)) {
+                    FilledIconButton(onClick = ::onPlayPressed, modifier = Modifier.padding(horizontal = 8.dp).size(52.dp)) {
                         Icon(
                             painterResource(if (isPlaying) R.drawable.ic_pause else R.drawable.ic_play),
                             contentDescription = if (isPlaying) "Pause" else "Play",
@@ -675,12 +683,7 @@ class BookActivity : AppCompatActivity() {
                     IconButton(onClick = { player.seekTo(player.position() + 30_000) }) {
                         Icon(painterResource(R.drawable.ic_forward_30), contentDescription = "Forward 30 seconds")
                     }
-                    TextButton(onClick = {
-                        val next = SPEEDS.firstOrNull { it > speed + 0.01f } ?: SPEEDS.first()
-                        player.speed = next
-                        speed = next
-                    }) { Text("${"%.2f".format(speed).trimEnd('0').trimEnd('.')}×") }
-                    Box {
+                    Box(Modifier.weight(1f), contentAlignment = Alignment.CenterEnd) {
                         IconButton(onClick = { menu = true }) { Icon(Icons.Filled.MoreVert, contentDescription = "More") }
                         DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
                             DropdownMenuItem(text = { Text("Go to the narrator's position") }, onClick = {
