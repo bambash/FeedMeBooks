@@ -49,6 +49,23 @@ jobs:
       - name: Build POC APK
         run: ./gradlew :app:assemblePoc --no-daemon --stacktrace
 
+      # Play rejects bundles whose native libraries are not 16 KB page-aligned (apps targeting
+      # Android 15+, since 2025-11-01). Fail here, not in the Console.
+      - name: Check 16 KB page alignment
+        run: |
+          rm -rf /tmp/apk-lib && mkdir -p /tmp/apk-lib
+          unzip -qo app/build/outputs/apk/poc/app-poc.apk 'lib/*' -d /tmp/apk-lib
+          status=0
+          for so in $(find /tmp/apk-lib -name '*.so'); do
+            bad=$(readelf -lW "$so" | awk '$1 == "LOAD" && strtonum($NF) < 16384 { print }')
+            if [[ -n "$bad" ]]; then
+              echo "::error::$so has LOAD segments aligned below 16 KB:"; echo "$bad"; status=1
+            else
+              echo "ok: ${so#/tmp/apk-lib/} ($(readelf -lW "$so" | awk '$1 == "LOAD" { print $NF }' | sort -u | tr '\n' ' '))"
+            fi
+          done
+          exit $status
+
       - name: Name APK
         id: apk
         run: |

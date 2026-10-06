@@ -1,32 +1,40 @@
-# HANDOFF — FeedMeBooks (written 2026-10-06 02:12 UTC, verify handoff hooks on main; no feature work)
+# HANDOFF — FeedMeBooks (written 2026-10-06 02:40 UTC, Play Store readiness for the native app)
 
 Committed checkpoint for the next session. Read the project's instruction files first; this file holds only what the repo and git history cannot tell you.
 
 ## Where things are
-- `main` = 0092c02 (PR #30, "make session-handoff hooks work in cloud sessions"). Working branch = `ccr-b0fac2fa-o3j2ps`, identical to `main` apart from this file. No open PRs, no worktrees, no open spec changes.
-- Cloud sessions clone the repo fresh and discard the container afterwards; nothing under `~/.claude` from the user's laptop exists there. Only what is pushed survives.
+- `main` = 0092c02 (PR #30). Working branch = `ccr-b0fac2fa-o3j2ps`, 3 commits ahead of `main`, not yet a PR. No worktrees, no open spec changes.
+- CI on the branch: *Native APK* run 37403807946 (ad997cc) is green on both jobs (POC APK and unsigned store bundle) with AGP 8.10.1, compileSdk/targetSdk 36. The 16 KB alignment check step added after that run has not been exercised yet.
+- Cloud sessions cannot build `:app` or run Gradle at all: Google's Maven (dl.google.com) and GitHub artifact storage are blocked by the proxy. CI is the only verifier; the public Actions API (`api.github.com/.../actions/runs/<id>`) is reachable for polling.
 - Lanes: none.
 
 ## What shipped this session
-- Nothing new. Verified PR #30 is merged and working: this session's startup context contained the "=== HANDOFF.md" block injected by `.claude/hooks/handoff-load.sh`, and `handoff-stale.sh` reported the one post-write commit (the PR #30 merge) on the first prompt.
+- cdc4d28: store build is `com.feedmebooks.app` (release) with the Lab moved to a `poc` build type (`com.feedmebooks.poc`, `src/poc/`), signing from `FEEDMEBOOKS_KEYSTORE_*` env, 16 KB linker flag on `whisper_jni`, `native-release.yml` on `v*` tags, Expo `build.yml` deleted, `docs/play-store.md`, `docs/privacy-policy.md`, `native/store/listing.md`.
+- ad997cc: the POC workflow also builds the unsigned store bundle every push (manual `workflow_dispatch` is refused for the Claude integration, 403).
 
 ## Next (in order)
-1. Laptop only: in the local clone run `sed -i '/^HANDOFF\.md$/d' .git/info/exclude`, done when `git check-ignore HANDOFF.md` prints nothing (the file is now tracked; the cloud clone is already clean).
-2. Laptop only: if the global `~/.claude/settings.json` also runs a `handoff-load.sh` SessionStart hook, drop that entry or guard it with `[ -f "$CLAUDE_PROJECT_DIR/.claude/hooks/handoff-load.sh" ] && exit 0`, done when a fresh laptop session shows the HANDOFF block exactly once.
-3. Pick up the next feature from `openspec/` or the user's request; there is no queued work in the repo.
+1. Confirm the new *Check 16 KB page alignment* step passes on the latest push (Actions → Native APK → newest run on `ccr-b0fac2fa-o3j2ps`); done when the step prints `ok: lib/arm64-v8a/libwhisper_jni.so (0x4000)`.
+2. Open a PR from `ccr-b0fac2fa-o3j2ps` to `main` and merge; done when *Native APK* is green on `main`.
+3. User, on a trusted machine: generate the upload key and set the four `FEEDMEBOOKS_KEYSTORE_*` secrets (commands in `docs/play-store.md`); done when a `v0.1.0` tag's *Native Release* run uploads an artifact named `feedmebooks-0.1.0-<n>.aab` without the "unsigned" warning.
+4. User, Play Console: create the app `com.feedmebooks.app`, host `docs/privacy-policy.md` at a public URL, fill the forms listed in `docs/play-store.md`, take phone screenshots into `native/store/`; done when the internal-track release is live.
+5. Install the store build on a phone that never had the POC app and walk through import, both handoffs, background playback, sleep timer; done when none of it regresses against the POC APK.
 
 ## Decisions and non-goals
-- Decided: commit HANDOFF.md instead of git-excluding it, because cloud containers are ephemeral and the branch is the only persistent state.
-- Decided: hooks resolve the repo root from `$CLAUDE_PROJECT_DIR` with a `git rev-parse --show-toplevel` fallback, so they also work when run by hand.
-- Decided: staleness is counted in commits since the last commit touching HANDOFF.md, with an mtime fallback only when the file is untracked.
-- Rejected: absolute `/home/nate/...` or `$HOME` hook paths in project settings, because the scripts are not present in cloud containers.
-- Rejected: file-mtime staleness, because a fresh clone stamps every file with the clone time.
-- Rejected: the user's global `wait-guard.py` PreToolUse hook in the project settings file, because it is not in the repo.
+- Decided: `applicationId = "com.feedmebooks"` with build-type suffixes `.app` (release) and `.poc`, so the store id is final and the POC APK keeps installing over itself. The namespace stays `feedmebooks.app`.
+- Decided: Lab/spike screens compile only in the `poc` build type; `LibraryActivity` reaches them by intent action `feedmebooks.app.action.LAB` guarded by `BuildConfig.LAB`, so `main` never references their classes.
+- Decided: `versionCode` = *Native Release* run number, `versionName` = tag. Never recreate that workflow under another name without setting `VERSION_CODE` above the last Play upload.
+- Decided: Readium stays at 3.1.2 and R8 stays off; neither is a Play requirement and both need a device test.
+- Decided: deleted `.github/workflows/build.yml` (Expo EAS production build) because it claimed `v*` tags; `ci.yml` (Expo typecheck/tests/debug APK) is still green and was left alone.
+- Rejected: committing any store keystore; only the throwaway POC key is in git, and `.gitignore` now blocks `native/app/*.keystore` except it.
+- Earlier: HANDOFF.md is committed, not git-excluded; hooks resolve the repo root from `$CLAUDE_PROJECT_DIR`; staleness is counted in commits.
 
 ## Waiting on the user
-- Nothing. Steps 1 and 2 under Next can only be done on the laptop.
+- Upload key + secrets, Play Console account/forms, screenshots, privacy-policy hosting (Next 3–4). Nothing in the repo can do these.
+- Merge of the branch (Next 2).
 
 ## Gotchas learned (not in the repo)
-- `git fetch origin <a> <b>` fails entirely if either ref is missing → the cloud harness pre-creates a local `origin/<branch>` ref that does not exist on GitHub → fetch refs one at a time.
-- The local `origin/main` ref in a fresh cloud clone can lag GitHub (here it pointed at PR #28 while GitHub was at PR #30) → run `git fetch origin main` before trusting it.
-- The once-an-hour stale reminder is throttled by a stamp file in `.git/`, so a manual test run looks silent on the second call → pass `--force`.
+- `git fetch origin <a> <b>` fails entirely if either ref is missing → fetch refs one at a time; the pre-created local `origin/main` can lag GitHub → `git fetch origin main` first.
+- `mcp__github__actions_run_trigger` (workflow_dispatch) → 403 "Resource not accessible by integration" → add a CI job instead of dispatching by hand.
+- Artifact download URLs point at `*.blob.core.windows.net`, which the proxy denies → verify build outputs with CI steps (`readelf`, `unzip`) rather than locally.
+- A push to the same branch cancels the in-progress *Native APK* run (`cancel-in-progress: true`), so a wait on the old run id ends as "cancelled".
+- The once-an-hour stale reminder is throttled by a stamp file in `.git/`; pass `--force` to test it twice.
