@@ -3,7 +3,8 @@ name: Native APK
 # Builds the native Kotlin app's POC variant (the store build plus the Lab screens, signed
 # with the committed POC key) and publishes one installable APK per run.
 # Download: Actions → this workflow → a run → Artifacts → feedmebooks-poc-<sha>.
-# The store bundle is built by native-release.yml on version tags.
+# A second job builds the store variant unsigned, so a change that only breaks the release
+# build type is caught here; the signed bundle is built by native-release.yml on version tags.
 
 on:
   push:
@@ -62,3 +63,34 @@ jobs:
           path: native/${{ steps.apk.outputs.name }}.apk
           if-no-files-found: error
           retention-days: 30
+
+  bundle:
+    name: Store bundle (unsigned)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: native
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Build store bundle
+        run: ./gradlew :app:bundleRelease --no-daemon --stacktrace
+
+      - name: Upload bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: feedmebooks-store-unsigned-${{ github.sha }}
+          path: native/app/build/outputs/bundle/release/app-release.aab
+          if-no-files-found: error
+          retention-days: 7
