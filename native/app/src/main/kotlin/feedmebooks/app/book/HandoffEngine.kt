@@ -1,13 +1,13 @@
 package feedmebooks.app.book
 
 import android.content.Context
-import feedmebooks.app.SpikeState
 import feedmebooks.app.audio.Playlist
 import feedmebooks.app.audio.PlaylistTranscriber
 import feedmebooks.app.library.BookStore
 import feedmebooks.app.reader.LoadedBook
 import feedmebooks.app.whisper.ModelStore
 import feedmebooks.app.whisper.Whisper
+import feedmebooks.app.whisper.WhisperLoader
 import feedmebooks.app.whisper.WhisperModel
 import feedmebooks.core.AnchorMap
 import feedmebooks.core.AudioTarget
@@ -28,7 +28,7 @@ object SpeechModel {
     /** Downloads on first use (≈75 MB, once), then loads and keeps it in memory. */
     suspend fun get(context: Context, onDownload: (Float) -> Unit): Whisper = withContext(Dispatchers.IO) {
         if (!isReady(context)) ModelStore.download(context, model, onDownload)
-        SpikeState.whisper(context, model).first
+        WhisperLoader.get(context, model).first
     }
 }
 

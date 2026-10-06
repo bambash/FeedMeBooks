@@ -21,3 +21,6 @@ FetchContent_MakeAvailable(whisper)
 
 add_library(whisper_jni SHARED whisper_jni.cpp)
 target_link_libraries(whisper_jni PRIVATE whisper log)
+# Play requires 16 KB page-size support for apps targeting Android 15+; NDK r27 still aligns
+# segments at 4 KB unless told otherwise (r28+ makes this the default).
+target_link_options(whisper_jni PRIVATE "-Wl,-z,max-page-size=16384")

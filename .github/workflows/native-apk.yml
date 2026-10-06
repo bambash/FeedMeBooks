@@ -1,7 +1,9 @@
 name: Native APK
 
-# Builds the native Kotlin POC and publishes one installable APK per run.
+# Builds the native Kotlin app's POC variant (the store build plus the Lab screens, signed
+# with the committed POC key) and publishes one installable APK per run.
 # Download: Actions → this workflow → a run → Artifacts → feedmebooks-poc-<sha>.
+# The store bundle is built by native-release.yml on version tags.
 
 on:
   push:
@@ -43,14 +45,14 @@ jobs:
       - name: Core tests
         run: ./gradlew :core:test --no-daemon
 
-      - name: Build release APK
-        run: ./gradlew :app:assembleRelease --no-daemon --stacktrace
+      - name: Build POC APK
+        run: ./gradlew :app:assemblePoc --no-daemon --stacktrace
 
       - name: Name APK
         id: apk
         run: |
           name="feedmebooks-poc-${GITHUB_SHA::7}"
-          mv app/build/outputs/apk/release/app-release.apk "$name.apk"
+          mv app/build/outputs/apk/poc/app-poc.apk "$name.apk"
           echo "name=$name" >> "$GITHUB_OUTPUT"
 
       - name: Upload APK

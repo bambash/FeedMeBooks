@@ -24,12 +24,6 @@
         <activity
             android:name=".book.BookActivity"
             android:exported="false" />
-        <activity
-            android:name=".LabActivity"
-            android:exported="false" />
-        <activity
-            android:name=".reader.ReaderSpikeActivity"
-            android:exported="false" />
 
         <service
             android:name=".playback.PlaybackService"

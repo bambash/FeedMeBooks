@@ -18,3 +18,9 @@ web-build/
 
 # OpenCode broker repo-local state
 .opencode-broker/
+
+# Store signing: the upload keystore is decoded from CI secrets, never committed
+# (the POC key in native/app/poc-signing.keystore is public on purpose).
+native/app/*.keystore
+!native/app/poc-signing.keystore
+service-account.json

@@ -6,19 +6,31 @@ plugins {
     kotlin("plugin.compose")
 }
 
+/**
+ * Store signing comes from the environment, never from the repo: CI decodes the upload
+ * keystore from secrets into `app/upload.keystore` (gitignored) and exports these four
+ * variables. Without them the release build is left unsigned, which still compiles.
+ */
+val storeKeystore = System.getenv("FEEDMEBOOKS_KEYSTORE_FILE")?.let(::file)?.takeIf { it.exists() }
+
 android {
     namespace = "feedmebooks.app"
-    compileSdk = 35
+    compileSdk = 36
 
     defaultConfig {
-        applicationId = "com.feedmebooks.poc"
+        // The store id is com.feedmebooks.app; the POC build adds ".poc" and stays installable alongside it.
+        applicationId = "com.feedmebooks"
         minSdk = 26
-        targetSdk = 35
-        versionCode = (System.getenv("GITHUB_RUN_NUMBER") ?: "1").toInt()
-        versionName = "0.1.${System.getenv("GITHUB_RUN_NUMBER") ?: "0"}"
+        // Play requires API 36 for new apps and updates since 2026-08-31.
+        targetSdk = 36
+        // Play needs a strictly increasing versionCode. The release workflow passes VERSION_CODE
+        // (its run number) and VERSION_NAME (the tag); the POC workflow and local builds fall back.
+        versionCode = (System.getenv("VERSION_CODE") ?: System.getenv("GITHUB_RUN_NUMBER") ?: "1").toInt()
+        versionName = System.getenv("VERSION_NAME") ?: "0.1.${System.getenv("GITHUB_RUN_NUMBER") ?: "0"}"
         buildConfigField("String", "GIT_SHA", "\"${System.getenv("GITHUB_SHA")?.take(7) ?: "local"}\"")
+        buildConfigField("boolean", "LAB", "false")
 
-        // One ABI keeps the APK small and the native build fast; every current Android phone is arm64.
+        // One ABI keeps the bundle small and the native build fast; every current Android phone is arm64.
         ndk { abiFilters += "arm64-v8a" }
         externalNativeBuild {
             cmake { arguments += listOf("-DCMAKE_BUILD_TYPE=Release") }
@@ -33,27 +45,45 @@ android {
     }
 
     signingConfigs {
-        // A throwaway key committed on purpose: every CI build is signed the same way,
-        // so a new APK installs over the old one. Not for store distribution.
+        // A throwaway key committed on purpose: every POC build is signed the same way,
+        // so a new APK installs over the old one. Never used for the store build.
         create("poc") {
             storeFile = file("poc-signing.keystore")
             storePassword = "feedmebooks"
             keyAlias = "poc"
             keyPassword = "feedmebooks"
         }
+        if (storeKeystore != null) {
+            create("store") {
+                storeFile = storeKeystore
+                storePassword = System.getenv("FEEDMEBOOKS_KEYSTORE_PASSWORD")
+                keyAlias = System.getenv("FEEDMEBOOKS_KEY_ALIAS")
+                keyPassword = System.getenv("FEEDMEBOOKS_KEY_PASSWORD")
+            }
+        }
     }
 
     buildTypes {
-        // Release, not debug: native code (whisper.cpp) must be optimized for honest benchmarks.
+        // The store build: com.feedmebooks.app, signed with the upload key when it is present.
         release {
+            applicationIdSuffix = ".app"
             isMinifyEnabled = false
+            signingConfig = storeKeystore?.let { signingConfigs.getByName("store") }
+        }
+        // The CI/POC build: same optimized code (whisper.cpp must be optimized for honest
+        // benchmarks), plus the Lab screens, under the id and key every POC APK has had.
+        create("poc") {
+            initWith(getByName("release"))
+            applicationIdSuffix = ".poc"
             signingConfig = signingConfigs.getByName("poc")
+            buildConfigField("boolean", "LAB", "true")
+            matchingFallbacks += "release"
         }
     }
 
     lint {
-        // lifecycle 2.9's bundled lint checks crash AGP 8.7's lint during the release
-        // "lint vital" gate. Lint still runs on demand (./gradlew :app:lint).
+        // lifecycle 2.9's bundled lint checks crashed lint's release gate on older AGP; keep the
+        // gate off until it is verified clean. Lint still runs on demand (./gradlew :app:lint).
         checkReleaseBuilds = false
     }
 
@@ -98,7 +128,7 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-guava:1.10.2")
     implementation("androidx.compose.material:material-icons-core")
 
-    // 3.1.x is the newest line that builds against compileSdk 35 (3.2+ needs 36).
+    // 3.1.x needs no newer compileSdk; 3.2+ (compileSdk 36) is now an option but untested on a device.
     val readium = "3.1.2"
     implementation("org.readium.kotlin-toolkit:readium-shared:$readium")
     implementation("org.readium.kotlin-toolkit:readium-streamer:$readium")

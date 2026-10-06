@@ -62,7 +62,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
-import feedmebooks.app.LabActivity
+import feedmebooks.app.BuildConfig
 import feedmebooks.app.R
 import feedmebooks.app.audio.Playlist
 import feedmebooks.app.audio.formatDuration
@@ -77,6 +77,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.readium.r2.shared.publication.services.cover
+
+/** Opens the Lab (POC builds only); declared by the `poc` manifest. */
+private const val LAB_ACTION = "feedmebooks.app.action.LAB"
 
 /** The launcher: your books, with reading and listening progress, and adding new ones. */
 class LibraryActivity : ComponentActivity() {
@@ -143,7 +146,10 @@ private fun LibraryScreen() {
             ) {
                 Image(painterResource(R.drawable.ic_brand_mark), contentDescription = null, modifier = Modifier.size(30.dp))
                 Text(stringResource(R.string.app_name), style = MaterialTheme.typography.headlineSmall, modifier = Modifier.weight(1f))
-                TextButton(onClick = { context.startActivity(Intent(context, LabActivity::class.java)) }) { Text("Lab") }
+                if (BuildConfig.LAB) {
+                    // The spike screens live in the `poc` source set; store builds don't contain them.
+                    TextButton(onClick = { context.startActivity(Intent(LAB_ACTION).setPackage(context.packageName)) }) { Text("Lab") }
+                }
                 IconButton(onClick = { settings = true }) { Icon(Icons.Filled.Settings, contentDescription = "Settings") }
             }
             if (settings) ReaderSettingsSheet(showFollow = true) { settings = false }

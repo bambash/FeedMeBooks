@@ -36,8 +36,10 @@ See [`../docs/poc-plan.md`](../docs/poc-plan.md) for the plan and decisions.
     own answers were off by a page on a real book.
   - `whisper/`, `audio/`: whisper.cpp JNI, the model download, and MP4/MP3 decoding
     stitched across files.
-  - `LabActivity` + `reader/ReaderSpikeActivity`: the spike screens (Whisper speed,
-    handoff test, navigation test), reached from the library's "Lab" button.
+  - `src/poc/`: `LabActivity`, `ReaderSpikeActivity` and `SpikeState`, the spike screens
+    (Whisper speed, handoff test, navigation test), reached from the library's "Lab" button.
+    They are only compiled into the `poc` build type; the store build has neither the
+    screens nor the button.
 
 ## In the reader
 
@@ -71,13 +73,24 @@ Tests run against a simulated audiobook (`Simulation.kt`). It includes a narrato
 intro, a skipped paragraph, drifting pace, and a fake Whisper that drops, misspells
 and inserts words, so every result can be checked against the known true position.
 
+## Build types
+
+- **poc** (`com.feedmebooks.poc`): the store build plus the Lab screens, signed with the
+  committed throwaway key `app/poc-signing.keystore`, so a new APK installs over the old one.
+- **release** (`com.feedmebooks.app`): the Play Store build. No Lab, signed with the upload
+  key from the `FEEDMEBOOKS_KEYSTORE_*` environment variables (unsigned when they are absent).
+
 ## Get the APK
 
 Every push that touches `native/` runs the **Native APK** workflow
 (`.github/workflows/native-apk.yml`). Open the run in GitHub Actions and download the
-`feedmebooks-poc-<sha>` artifact. It's a zip containing a single APK. Every build is
-signed with the same committed POC key (`app/poc-signing.keystore`), so a new APK
-installs over the previous one.
+`feedmebooks-poc-<sha>` artifact. It's a zip containing a single POC APK.
 
-The Android SDK is needed to build `:app` locally. `./gradlew :app:assembleRelease`
-writes the APK to `app/build/outputs/apk/release/`.
+The Android SDK is needed to build `:app` locally. `./gradlew :app:assemblePoc` writes the
+APK to `app/build/outputs/apk/poc/`.
+
+## Ship to Play
+
+Tag a release (`v1.0.0`) and the **Native Release** workflow builds the signed store bundle.
+Everything else, from the upload key to the Console forms, is in
+[`../docs/play-store.md`](../docs/play-store.md).

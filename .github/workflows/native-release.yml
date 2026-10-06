@@ -1,0 +1,133 @@
+name: Native Release
+
+# Builds the signed Play Store bundle (AAB) for the native app.
+#
+# Runs on:
+#   • Version tags (v1.2.3)  → versionName 1.2.3, uploaded to the Play internal track when
+#                               the Play secret is set
+#   • Manual dispatch        → same build from any branch, never uploaded to Play
+#
+# Required secrets (Settings → Secrets and variables → Actions):
+#   FEEDMEBOOKS_KEYSTORE_BASE64   base64 of the upload keystore (see docs/play-store.md)
+#   FEEDMEBOOKS_KEYSTORE_PASSWORD
+#   FEEDMEBOOKS_KEY_ALIAS
+#   FEEDMEBOOKS_KEY_PASSWORD
+# Optional:
+#   PLAY_SERVICE_ACCOUNT_JSON     Play Console service-account key with "Release to testing
+#                                 tracks" on the app; without it the AAB is only an artifact.
+#
+# Without the keystore secrets the bundle is built unsigned (useful to check the build on a
+# branch) and the upload step is skipped.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+concurrency:
+  group: native-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  bundle:
+    name: Test and build store bundle
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: native
+    env:
+      # The run number only ever goes up, which is all Play asks of versionCode.
+      VERSION_CODE: ${{ github.run_number }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Version from tag
+        id: version
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            name="${GITHUB_REF#refs/tags/v}"
+          else
+            name="0.0.${GITHUB_RUN_NUMBER}-${GITHUB_SHA::7}"
+          fi
+          echo "VERSION_NAME=$name" >> "$GITHUB_ENV"
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+
+      - name: Core tests
+        run: ./gradlew :core:test --no-daemon
+
+      - name: Decode upload keystore
+        id: keystore
+        env:
+          KEYSTORE_BASE64: ${{ secrets.FEEDMEBOOKS_KEYSTORE_BASE64 }}
+        run: |
+          if [[ -n "$KEYSTORE_BASE64" ]]; then
+            echo "$KEYSTORE_BASE64" | base64 --decode > app/upload.keystore
+            echo "FEEDMEBOOKS_KEYSTORE_FILE=$PWD/app/upload.keystore" >> "$GITHUB_ENV"
+            echo "signed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::FEEDMEBOOKS_KEYSTORE_BASE64 is not set; building an unsigned bundle."
+            echo "signed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build store bundle
+        env:
+          FEEDMEBOOKS_KEYSTORE_PASSWORD: ${{ secrets.FEEDMEBOOKS_KEYSTORE_PASSWORD }}
+          FEEDMEBOOKS_KEY_ALIAS: ${{ secrets.FEEDMEBOOKS_KEY_ALIAS }}
+          FEEDMEBOOKS_KEY_PASSWORD: ${{ secrets.FEEDMEBOOKS_KEY_PASSWORD }}
+        run: ./gradlew :app:bundleRelease --no-daemon --stacktrace
+
+      - name: Name bundle
+        id: aab
+        run: |
+          name="feedmebooks-${{ steps.version.outputs.name }}-${VERSION_CODE}"
+          mv app/build/outputs/bundle/release/app-release.aab "$name.aab"
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+
+      - name: Upload bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.aab.outputs.name }}
+          path: native/${{ steps.aab.outputs.name }}.aab
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Play service account
+        id: play
+        if: startsWith(github.ref, 'refs/tags/v') && steps.keystore.outputs.signed == 'true'
+        env:
+          SERVICE_ACCOUNT_JSON: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON }}
+        run: |
+          if [[ -n "$SERVICE_ACCOUNT_JSON" ]]; then
+            printf '%s' "$SERVICE_ACCOUNT_JSON" > "$RUNNER_TEMP/play-service-account.json"
+            echo "upload=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::PLAY_SERVICE_ACCOUNT_JSON is not set; upload the AAB artifact in Play Console by hand."
+            echo "upload=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Upload to Play internal track
+        if: steps.play.outputs.upload == 'true'
+        uses: r0adkll/upload-google-play@v1
+        with:
+          serviceAccountJson: ${{ runner.temp }}/play-service-account.json
+          packageName: com.feedmebooks.app
+          releaseFiles: native/${{ steps.aab.outputs.name }}.aab
+          track: internal
+          status: completed
+
+      - name: Remove secrets from the runner
+        if: always()
+        run: rm -f app/upload.keystore "$RUNNER_TEMP/play-service-account.json"

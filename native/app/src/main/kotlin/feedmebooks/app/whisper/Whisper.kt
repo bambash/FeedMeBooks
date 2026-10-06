@@ -72,6 +72,22 @@ class Whisper private constructor(private var handle: Long) : Closeable {
     }
 }
 
+/** Keeps one loaded model in memory; Whisper isn't thread-safe, so callers serialize their transcriptions. */
+object WhisperLoader {
+    private var loaded: Pair<WhisperModel, Whisper>? = null
+
+    /** Loads (or reuses) [model]; returns it with the load time in ms (0 if it was already loaded). */
+    @Synchronized
+    fun get(context: Context, model: WhisperModel): Pair<Whisper, Long> {
+        loaded?.takeIf { it.first == model }?.let { return it.second to 0L }
+        loaded?.second?.close()
+        val began = System.currentTimeMillis()
+        val whisper = Whisper.load(ModelStore.file(context, model))
+        loaded = model to whisper
+        return whisper to System.currentTimeMillis() - began
+    }
+}
+
 object ModelStore {
     private const val BASE_URL = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/"
 
